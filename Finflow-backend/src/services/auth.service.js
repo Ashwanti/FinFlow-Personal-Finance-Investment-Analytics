@@ -3,6 +3,7 @@ const bcrypt = require("bcryptjs");
 const env = require("../config/env");
 const User = require("../models/user.model");
 const ApiError = require("../utils/ApiError");
+const categoryService = require("./category.service");
 const tokenService = require("./token.service");
 
 // Compared against when a login hits an unknown email, so the response takes
@@ -35,6 +36,15 @@ async function register(input, context = {}) {
     ...(input.baseCurrency && { baseCurrency: input.baseCurrency }),
     ...(input.timezone && { timezone: input.timezone }),
   });
+
+  // A user with no categories cannot record a single transaction, so the
+  // defaults ship with the account. Failing to seed them is not worth losing a
+  // successful registration over — they can be created by hand.
+  try {
+    await categoryService.seedDefaults(user._id);
+  } catch (err) {
+    console.error("Failed to seed default categories:", err.message);
+  }
 
   return issueSession(user, context);
 }
