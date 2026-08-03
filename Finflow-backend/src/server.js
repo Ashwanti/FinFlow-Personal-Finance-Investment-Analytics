@@ -1,26 +1,54 @@
-require("dotenv").config();
+const env = require("./config/env");
 
 const app = require("./app");
+const { connectDB, disconnectDB } = require("./config/db");
 
-const PORT = process.env.PORT || 3000;
+let server;
 
-const server = app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
+async function start() {
+  // Connect before listening, so the process never accepts a request it
+  // cannot serve.
+  await connectDB();
+
+  server = app.listen(env.port, () => {
+    console.log(`🚀 Server running on http://localhost:${env.port} [${env.nodeEnv}]`);
+  });
+}
+
+async function shutdown(signal) {
+  console.log(`\n${signal} received. Shutting down gracefully...`);
+
+  const forceExit = setTimeout(() => {
+    console.error("Shutdown timed out. Forcing exit.");
+    process.exit(1);
+  }, 10000).unref();
+
+  try {
+    if (server) {
+      await new Promise((resolve, reject) =>
+        server.close((err) => (err ? reject(err) : resolve()))
+      );
+      console.log("HTTP server closed");
+    }
+    await disconnectDB();
+    console.log("MongoDB connection closed");
+    clearTimeout(forceExit);
+    process.exit(0);
+  } catch (err) {
+    console.error("Error during shutdown:", err);
+    process.exit(1);
+  }
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
+
+process.on("unhandledRejection", (reason) => {
+  console.error("💥 Unhandled promise rejection:", reason);
+  shutdown("unhandledRejection");
 });
 
-// Graceful shutdown
-process.on("SIGTERM", () => {
-  console.log("SIGTERM received. Shutting down gracefully...");
-  server.close(() => {
-    console.log("Server closed");
-    process.exit(0);
-  });
-});
-
-process.on("SIGINT", () => {
-  console.log("SIGINT received. Shutting down gracefully...");
-  server.close(() => {
-    console.log("Server closed");
-    process.exit(0);
-  });
+start().catch((err) => {
+  console.error("❌ Failed to start server:", err.message);
+  process.exit(1);
 });
