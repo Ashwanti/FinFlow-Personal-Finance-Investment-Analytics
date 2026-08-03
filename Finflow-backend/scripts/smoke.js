@@ -1,6 +1,6 @@
 /* eslint-disable no-console */
 /**
- * End-to-end smoke test for the API.
+ * End-to-end smoke test for the whole API.
  *
  *   npm run smoke
  *
@@ -22,6 +22,7 @@ const providedUri = process.env.MONGODB_URI;
 const SUITES = [
   ["Phase 1 — Auth", require("./suites/auth")],
   ["Phase 2 — Accounts, Categories, Transactions, Transfers", require("./suites/ledger")],
+  ["Phase 3 — Analytics", require("./suites/analytics")],
 ];
 
 let passed = 0;
@@ -80,8 +81,8 @@ async function main() {
     for (const [title, suite] of SUITES) {
       console.log(`\n${"═".repeat(64)}\n${title}\n${"═".repeat(64)}`);
 
-      // The ledger suite works on one clean account so its balances stay
-      // exact and hand-checkable.
+      // The ledger and analytics suites share one clean account so their
+      // balances stay exact and hand-checkable.
       if (!ctx.token) {
         const owner = await call("POST", "/api/auth/register", {
           body: {
