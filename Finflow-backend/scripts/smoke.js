@@ -4,8 +4,9 @@
  *
  *   npm run smoke
  *
- * Boots an in-memory MongoDB, runs the real Express app on an ephemeral port,
- * and walks every feature including the failure paths.
+ * Boots an in-memory MongoDB **replica set** — transactions need one, and
+ * transfers need transactions — then runs the real Express app on an ephemeral
+ * port and walks every feature including the failure paths.
  *
  * Set MONGODB_URI beforehand to run against a real database instead.
  */
@@ -18,7 +19,10 @@ process.env.BCRYPT_ROUNDS = process.env.BCRYPT_ROUNDS || "4";
 
 const providedUri = process.env.MONGODB_URI;
 
-const SUITES = [["Phase 1 — Auth", require("./suites/auth")]];
+const SUITES = [
+  ["Phase 1 — Auth", require("./suites/auth")],
+  ["Phase 2 — Accounts, Categories, Transactions, Transfers", require("./suites/ledger")],
+];
 
 let passed = 0;
 const failures = [];
@@ -39,9 +43,9 @@ async function main() {
   let memoryServer;
 
   if (!providedUri) {
-    const { MongoMemoryServer } = require("mongodb-memory-server");
-    console.log("Starting in-memory MongoDB (first run downloads a binary)...");
-    memoryServer = await MongoMemoryServer.create();
+    const { MongoMemoryReplSet } = require("mongodb-memory-server");
+    console.log("Starting in-memory MongoDB replica set (first run downloads a binary)...");
+    memoryServer = await MongoMemoryReplSet.create({ replSet: { count: 1 } });
     process.env.MONGODB_URI = memoryServer.getUri("finflow_smoke");
   } else {
     console.log("Using provided MONGODB_URI");
@@ -75,6 +79,20 @@ async function main() {
   try {
     for (const [title, suite] of SUITES) {
       console.log(`\n${"═".repeat(64)}\n${title}\n${"═".repeat(64)}`);
+
+      // The ledger suite works on one clean account so its balances stay
+      // exact and hand-checkable.
+      if (!ctx.token) {
+        const owner = await call("POST", "/api/auth/register", {
+          body: {
+            name: "Ledger Owner",
+            email: `ledger+${Date.now()}@smoke.test`,
+            password: "Passw0rd123",
+          },
+        });
+        if (owner.status === 201) ctx.token = owner.json.data.accessToken;
+      }
+
       await suite(ctx);
     }
   } finally {
