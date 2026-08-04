@@ -187,7 +187,15 @@ async function cashflow(user, query = {}) {
   return { range: { from, to }, interval, currency: user.baseCurrency, series };
 }
 
-/** Assets minus liabilities, right now, broken down by account type. */
+/**
+ * Assets minus liabilities, right now.
+ *
+ * Two components: cash across every account, and the market value of open
+ * investment positions. They are kept separate because an INVESTMENT account's
+ * balance is uninvested cash sitting at the broker — adding the positions to it
+ * would be right, but hiding that they are different things would make a
+ * negative cash balance in a margin account impossible to spot.
+ */
 async function netWorth(user) {
   const accounts = await Account.find({ user: user._id, isArchived: false }).sort({ type: 1, name: 1 });
 
@@ -212,12 +220,23 @@ async function netWorth(user) {
     else liabilitiesMinor += account.balanceMinor;
   }
 
+  // Required lazily: portfolio.service reaches back into price lookups, and a
+  // top-level require would make the two modules circular.
+  const { marketValue } = require("./portfolio.service");
+  const investments = await marketValue(user);
+
   return {
     currency: user.baseCurrency,
-    totalMinor,
-    assetsMinor,
+    totalMinor: totalMinor + investments.marketValueMinor,
+    cashMinor: totalMinor,
+    investmentsMinor: investments.marketValueMinor,
+    assetsMinor: assetsMinor + investments.marketValueMinor,
     liabilitiesMinor,
     accountCount: accounts.length,
+    positionCount: investments.positionCount,
+    // Positions with no usable price are excluded from the total rather than
+    // valued at zero, so the caller can tell "worth nothing" from "unknown".
+    unpricedPositionCount: investments.unpricedCount,
     byType: [...byType.values()].sort((a, b) => b.totalMinor - a.totalMinor),
   };
 }
@@ -228,6 +247,12 @@ async function netWorth(user) {
  * Historical balances are not stored, so this walks backwards from today's
  * balance and unwinds each month's movements. Transfers net to zero across the
  * pair of accounts, so they correctly leave the total untouched.
+ *
+ * Cash only. Historical *market* prices are not stored either, and there is no
+ * honest way to reconstruct them — mixing today's market value into a series
+ * built from past cashflows would invent a jump on whatever month the data
+ * happens to start. `includesInvestments: false` says so in the response
+ * rather than leaving the caller to discover it from a mismatched total.
  */
 async function netWorthTrend(user, { months = 12 } = {}) {
   const accounts = await Account.find({ user: user._id, isArchived: false }).select(
@@ -267,17 +292,23 @@ async function netWorthTrend(user, { months = 12 } = {}) {
     currentMinor,
     changeMinor: currentMinor - openingMinor,
     changePct: openingMinor !== 0 ? round(((currentMinor - openingMinor) / Math.abs(openingMinor)) * 100) : null,
+    includesInvestments: false,
     series,
   };
 }
 
 /** Everything a dashboard needs, in one round trip. */
 async function dashboard(user, query = {}) {
-  const [monthSummary, categories, flow, worth, recent] = await Promise.all([
+  const budgetService = require("./budget.service");
+  const portfolioService = require("./portfolio.service");
+
+  const [monthSummary, categories, flow, worth, budgets, investments, recent] = await Promise.all([
     summary(user, query),
     spendingByCategory(user, query),
     cashflow(user, { interval: "month" }),
     netWorth(user),
+    budgetService.overview(user),
+    portfolioService.portfolio(user),
     Transaction.find({ user: user._id })
       .populate([
         { path: "account", select: "name type" },
@@ -292,6 +323,24 @@ async function dashboard(user, query = {}) {
     topCategories: categories.categories.slice(0, 5),
     cashflow: flow.series,
     netWorth: worth,
+    budgets: {
+      budgetedMinor: budgets.budgetedMinor,
+      spentMinor: budgets.spentMinor,
+      remainingMinor: budgets.remainingMinor,
+      usedPct: budgets.usedPct,
+      overBudgetCount: budgets.overBudgetCount,
+      atRiskCount: budgets.atRiskCount,
+      alerts: budgets.alerts,
+    },
+    investments: {
+      marketValueMinor: investments.marketValueMinor,
+      costBasisMinor: investments.costBasisMinor,
+      unrealizedPnlMinor: investments.unrealizedPnlMinor,
+      unrealizedPnlPct: investments.unrealizedPnlPct,
+      positionCount: investments.positionCount,
+      unpricedCount: investments.unpricedCount,
+      allocation: investments.allocation,
+    },
     recentTransactions: recent.map((transaction) => transaction.toJSON()),
   };
 }
