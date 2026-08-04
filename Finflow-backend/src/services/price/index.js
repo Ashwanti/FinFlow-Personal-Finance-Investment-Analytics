@@ -76,14 +76,18 @@ async function writeCache(holding, quote) {
  * Loaded in one query and walked in memory: a twelve-month trend over a dozen
  * holdings would otherwise issue hundreds of point lookups.
  */
-async function loadSnapshots(holdings, since) {
+async function loadSnapshots(holdings, until = new Date()) {
   if (holdings.length === 0) return new Map();
 
   const keys = holdings.map((holding) => cacheKey(holding));
 
+  // Bounded above, not below. The lookup is "the last price at or before T", so
+  // a snapshot from before the window is the one that answers the window's
+  // first point — filtering it out would silently fall back to cost for every
+  // instrument bought before the chart starts.
   const rows = await PriceSnapshot.find({
     $or: keys.map((key) => ({ ...key })),
-    date: { $gte: since },
+    date: { $lte: until },
   }).sort({ date: 1 });
 
   const byKey = new Map();
@@ -125,7 +129,7 @@ async function getQuote(holding, { force = false } = {}) {
   // way for the user's own edit to appear not to have taken effect.
   if (!provider.requiresNetwork) {
     const quote = await provider.fetchQuote(holding);
-    if (!quote) return unpriced(holding, "No manual price set for this holding");
+    if (!quote) return lastKnown(holding, "No manual price set for this holding");
 
     // Still recorded for history: a manually maintained price is the only
     // record that instrument will ever have.
@@ -170,8 +174,7 @@ async function getQuote(holding, { force = false } = {}) {
     };
   }
 
-  // Last resort: the manual price, if the user set one before switching
-  // this holding to a vendor.
+  // The manual price, if the user set one before switching to a vendor.
   if (holding.manualPriceMinor !== null && holding.manualPriceMinor !== undefined) {
     return {
       priceMinor: holding.manualPriceMinor,
@@ -183,7 +186,32 @@ async function getQuote(holding, { force = false } = {}) {
     };
   }
 
-  return unpriced(holding, "No price available from the provider or manually");
+  return lastKnown(holding, "No price available from the provider or manually");
+}
+
+/**
+ * Last resort: the most recent recorded price, whatever wrote it.
+ *
+ * Usually that is a trade — someone paid this much for it, which is a real
+ * observation even if it is old. Valuing a position at what it last changed
+ * hands for beats dropping it out of the portfolio entirely, provided the age
+ * is reported so nobody mistakes it for a live mark.
+ *
+ * This is also what keeps the net worth trend and current net worth agreeing:
+ * both fall back to the same series.
+ */
+async function lastKnown(holding, reason) {
+  const snapshot = await PriceSnapshot.findOne(cacheKey(holding)).sort({ date: -1 });
+  if (!snapshot) return unpriced(holding, reason);
+
+  return {
+    priceMinor: snapshot.priceMinor,
+    currency: holding.currency,
+    asOf: snapshot.date,
+    source: holding.priceProvider,
+    stale: true,
+    error: `${reason}; valued at the last recorded price`,
+  };
 }
 
 const unpriced = (holding, error) => ({

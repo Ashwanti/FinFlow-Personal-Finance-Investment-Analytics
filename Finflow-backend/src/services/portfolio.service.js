@@ -286,7 +286,7 @@ async function valuationHistory(user, moments) {
 
   const [trades, snapshots, rates] = await Promise.all([
     Trade.find({ user: user._id }).sort({ date: 1, createdAt: 1 }),
-    priceService.loadSnapshots(holdings, moments[0]),
+    priceService.loadSnapshots(holdings, moments.at(-1)),
     fx.loadRates(user._id, user.baseCurrency),
   ]);
 
@@ -358,11 +358,48 @@ async function refreshPrices(user) {
   return priceService.refreshAll(holdings);
 }
 
+/**
+ * Fills price history from the trade record.
+ *
+ * A trade is itself a price observation: someone paid ₹1,420 for this
+ * instrument on that date, which is exactly what a snapshot records. So the
+ * history a portfolio needs does not have to be bought from a vendor or waited
+ * for — most of it is already sitting in the ledger.
+ *
+ * This is what makes the net worth trend meaningful on day one instead of only
+ * from the day price recording started.
+ */
+async function backfillSnapshots(user) {
+  const holdings = await Holding.find({ user: user._id });
+  if (holdings.length === 0) return { holdings: 0, snapshots: 0 };
+
+  const byId = new Map(holdings.map((holding) => [String(holding._id), holding]));
+  const trades = await Trade.find({ user: user._id }).sort({ date: 1, createdAt: 1 });
+
+  let snapshots = 0;
+
+  for (const trade of trades) {
+    const holding = byId.get(String(trade.holding));
+    // A zero-price trade (a gift, a bonus issue) is not a valuation.
+    if (!holding || !trade.pricePerUnitMinor) continue;
+
+    await priceService.recordSnapshot(holding, {
+      priceMinor: trade.pricePerUnitMinor,
+      currency: holding.currency,
+      asOf: trade.date,
+    });
+    snapshots += 1;
+  }
+
+  return { holdings: holdings.length, trades: trades.length, snapshots };
+}
+
 module.exports = {
   portfolio,
   performance,
   marketValue,
   valuationHistory,
   refreshPrices,
+  backfillSnapshots,
   loadPositions,
 };

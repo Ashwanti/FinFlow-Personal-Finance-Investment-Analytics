@@ -23,6 +23,7 @@ router.use(requireAuth);
 router.get("/portfolio", validate({ query: portfolioSchema }), investmentController.portfolio);
 router.get("/performance", validate({ query: portfolioSchema }), investmentController.performance);
 router.post("/prices/refresh", investmentController.refreshPrices);
+router.post("/prices/backfill", investmentController.backfillPrices);
 
 // --- holdings ---
 router.get("/holdings", validate({ query: listHoldingsSchema }), investmentController.listHoldings);
