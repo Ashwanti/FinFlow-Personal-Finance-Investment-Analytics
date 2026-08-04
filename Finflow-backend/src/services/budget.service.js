@@ -10,6 +10,7 @@ const Category = require("../models/category.model");
 const Transaction = require("../models/transaction.model");
 const ApiError = require("../utils/ApiError");
 const { enumeratePeriods, periodRange, startOfPeriod } = require("../utils/dates");
+const fx = require("./fx.service");
 
 /**
  * Budgets are evaluated, never stored as running totals.
@@ -32,8 +33,8 @@ function statusFor(spentMinor, availableMinor) {
   return BUDGET_STATUS.OK;
 }
 
-async function spentBetween(userId, categoryId, from, to) {
-  const [row] = await Transaction.aggregate([
+async function spentBetween(userId, categoryId, from, to, toCurrency, rates) {
+  const rows = await Transaction.aggregate([
     {
       $match: {
         user: userId,
@@ -42,10 +43,24 @@ async function spentBetween(userId, categoryId, from, to) {
         date: { $gte: from, $lt: to },
       },
     },
-    { $group: { _id: null, totalMinor: { $sum: "$amountMinor" }, count: { $sum: 1 } } },
+    {
+      // Per currency, so a cap denominated in one currency is not compared
+      // against a sum of several added together as plain numbers.
+      $group: { _id: "$currency", totalMinor: { $sum: "$amountMinor" }, count: { $sum: 1 } },
+    },
   ]);
 
-  return { spentMinor: row?.totalMinor ?? 0, transactionCount: row?.count ?? 0 };
+  const { totalMinor, unconverted } = fx.sumConverted(
+    rows.map((row) => ({ currency: row._id, amountMinor: row.totalMinor })),
+    toCurrency,
+    rates
+  );
+
+  return {
+    spentMinor: totalMinor,
+    transactionCount: rows.reduce((total, row) => total + row.count, 0),
+    unconverted,
+  };
 }
 
 /**
@@ -54,7 +69,7 @@ async function spentBetween(userId, categoryId, from, to) {
  * Walks the finished periods rather than only the previous one, so a budget
  * left alone for three months carries all three.
  */
-async function carriedForward(userId, budget, currentStart, timeZone) {
+async function carriedForward(userId, budget, currentStart, timeZone, toCurrency, rates) {
   if (!budget.rollover) return 0;
 
   const unit = BUDGET_PERIOD_UNITS[budget.period];
@@ -68,31 +83,32 @@ async function carriedForward(userId, budget, currentStart, timeZone) {
   );
   if (periods.length === 0) return 0;
 
-  const [row] = await Transaction.aggregate([
-    {
-      $match: {
-        user: userId,
-        category: budget.category._id ?? budget.category,
-        type: TRANSACTION_TYPES.EXPENSE,
-        date: { $gte: firstStart, $lt: currentStart },
-      },
-    },
-    { $group: { _id: null, totalMinor: { $sum: "$amountMinor" } } },
-  ]);
+  const { spentMinor } = await spentBetween(
+    userId,
+    budget.category._id ?? budget.category,
+    firstStart,
+    currentStart,
+    toCurrency,
+    rates
+  );
 
   const budgetedMinor = budget.amountMinor * periods.length;
-  return budgetedMinor - (row?.totalMinor ?? 0);
+  return budgetedMinor - spentMinor;
 }
 
 /** A budget plus everything derived from it for one period. */
-async function evaluate(user, budget, reference = new Date()) {
+async function evaluate(user, budget, reference = new Date(), rates = null) {
   const unit = BUDGET_PERIOD_UNITS[budget.period];
   const { start, end } = periodRange(reference, unit, user.timezone);
 
+  // Loaded once by list()/overview() and passed down, so evaluating twenty
+  // budgets does not re-read the rate table twenty times.
+  const fxRates = rates ?? (await fx.loadRates(user._id, user.baseCurrency));
+
   const categoryId = budget.category._id ?? budget.category;
-  const [{ spentMinor, transactionCount }, rolloverMinor] = await Promise.all([
-    spentBetween(user._id, categoryId, start, end),
-    carriedForward(user._id, budget, start, user.timezone),
+  const [{ spentMinor, transactionCount, unconverted }, rolloverMinor] = await Promise.all([
+    spentBetween(user._id, categoryId, start, end, user.baseCurrency, fxRates),
+    carriedForward(user._id, budget, start, user.timezone, user.baseCurrency, fxRates),
   ]);
 
   const availableMinor = budget.amountMinor + rolloverMinor;
@@ -127,6 +143,8 @@ async function evaluate(user, budget, reference = new Date()) {
     spentMinor,
     remainingMinor,
     transactionCount,
+    // Spending in currencies with no known rate, left out of spentMinor.
+    unconverted,
 
     usedPct: availableMinor > 0 ? round((spentMinor / availableMinor) * 100) : null,
     status: statusFor(spentMinor, availableMinor),
@@ -167,8 +185,11 @@ async function list(user, { includeArchived = false, at } = {}) {
 
   const budgets = await Budget.find(filter).populate("category", "name icon color kind");
   const reference = at ?? new Date();
+  const rates = await fx.loadRates(user._id, user.baseCurrency);
 
-  const evaluated = await Promise.all(budgets.map((budget) => evaluate(user, budget, reference)));
+  const evaluated = await Promise.all(
+    budgets.map((budget) => evaluate(user, budget, reference, rates))
+  );
 
   // Most urgent first: over budget, then closest to the cap.
   return evaluated.sort((a, b) => (b.usedPct ?? 0) - (a.usedPct ?? 0));
