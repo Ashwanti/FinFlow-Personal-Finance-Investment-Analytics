@@ -26,6 +26,16 @@ const jobLockSchema = new mongoose.Schema(
     owner: { type: String, required: true },
     acquiredAt: { type: Date, required: true },
     expiresAt: { type: Date, required: true },
+    /**
+     * Increments on every acquisition, so a holder can tell whether the lease
+     * moved on without it.
+     *
+     * A process that stalls past its TTL wakes up still believing it holds the
+     * lock. The expiry alone cannot tell it otherwise — but the fence can: if
+     * the number has changed, someone else has been and gone, and the stale
+     * holder must not write.
+     */
+    fence: { type: Number, default: 0 },
     lastFinishedAt: { type: Date, default: null },
     lastError: { type: String, default: null },
   },
