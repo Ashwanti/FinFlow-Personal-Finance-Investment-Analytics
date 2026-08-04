@@ -50,4 +50,15 @@ module.exports = {
     syncIntervalMinutes: Number(process.env.PRICE_SYNC_INTERVAL_MINUTES) || 15,
     coingeckoBaseUrl: process.env.COINGECKO_BASE_URL || "https://api.coingecko.com/api/v3",
   },
+  fx: {
+    // Live rate feed. "manual" means rates are only ever what the user enters.
+    provider: process.env.FX_PROVIDER || "manual",
+    // Beyond this, a stored rate is reported as stale. Two days covers a
+    // weekend, since the ECB does not publish on one.
+    maxAgeHours: Number(process.env.FX_RATE_MAX_AGE_HOURS) || 48,
+    syncEnabled: process.env.FX_SYNC_ENABLED === "true" && nodeEnv !== "test",
+    // Reference rates update once a day, so polling faster only wastes calls.
+    syncIntervalMinutes: Number(process.env.FX_SYNC_INTERVAL_MINUTES) || 720,
+    frankfurterBaseUrl: process.env.FRANKFURTER_BASE_URL || "https://api.frankfurter.app",
+  },
 };

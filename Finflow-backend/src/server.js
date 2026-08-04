@@ -2,6 +2,7 @@ const env = require("./config/env");
 
 const app = require("./app");
 const { connectDB, disconnectDB } = require("./config/db");
+const fxSync = require("./jobs/fxSync.job");
 const priceSync = require("./jobs/priceSync.job");
 
 let server;
@@ -18,6 +19,7 @@ async function start() {
   // Started after the server is up: a vendor being slow should delay prices,
   // not the port opening.
   priceSync.start();
+  fxSync.start();
 }
 
 async function shutdown(signal) {
@@ -30,6 +32,7 @@ async function shutdown(signal) {
 
   try {
     priceSync.stop();
+    fxSync.stop();
 
     if (server) {
       await new Promise((resolve, reject) =>
