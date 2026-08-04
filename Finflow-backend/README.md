@@ -2,8 +2,9 @@
 
 Personal finance & investment analytics API. Node + Express 5 + MongoDB (Mongoose).
 
-**Phases 1–3 are complete:** auth, the accounts/categories/transactions ledger
-with correct transfer handling, and analytics on top of it.
+**All five phases are complete:** auth, the accounts/categories/transactions
+ledger with correct transfer handling, analytics, budgets, and an investment
+portfolio with FIFO cost basis and XIRR.
 
 ---
 
@@ -34,7 +35,7 @@ or create a free cluster on MongoDB Atlas.
 |---|---|
 | `npm run dev` | Start with nodemon, reloading on change |
 | `npm start` | Start for production |
-| `npm run smoke` | 144-check end-to-end test against an in-memory MongoDB |
+| `npm run smoke` | 248-check end-to-end test against an in-memory MongoDB |
 | `npm run seed` | Fill your database with 6 months of realistic demo data |
 
 `npm run smoke` needs no database and no configuration — it is the fastest way
@@ -76,7 +77,7 @@ automatically, so controllers need no `try/catch`.
 
 ---
 
-## The two decisions everything rests on
+## The three decisions everything rests on
 
 ### 1. Money is stored as integers
 
@@ -113,6 +114,19 @@ Consequences enforced in code and covered by tests:
 - Deleting **either** leg deletes both. A one-sided transfer is corruption.
 - Editing a transfer moves both balances.
 - Net worth is unchanged by any transfer, at every point in its lifecycle.
+
+### 3. Buying an investment is not spending either
+
+The same mistake, one domain over. Paying ₹14,000 for shares does not make you
+₹14,000 poorer — you swapped cash for something you still own. A trade is
+therefore **not** a Transaction: it adjusts the broker account's cash balance
+directly, and the position appears in net worth as market value.
+
+The test that pins this down: after a ₹14,000 buy with a ₹20 fee, net worth
+falls by exactly ₹20. The fee is real money gone; the ₹14,000 is not.
+
+Fees are folded into cost basis, so a position only shows a profit once it has
+covered what the trade actually cost.
 
 ---
 
@@ -205,7 +219,98 @@ without polluting income or expense. `savingsRatePct` is `null`, not `0`, when
 there was no income — "0% saved" would be a claim the data cannot support.
 
 Net worth has no stored history; the trend walks backwards from today's balance
-and unwinds each month's movements.
+and unwinds each month's movements. It reports `includesInvestments: false` —
+historical *market* prices are not stored either, and folding today's market
+value into a series built from past cashflows would invent a jump wherever the
+data happens to start.
+
+### Budgets
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/budgets` | Every budget with live progress |
+| `POST` | `/budgets` | Create (`period`: `WEEKLY`, `MONTHLY`, `YEARLY`) |
+| `GET` | `/budgets/overview` | Totals plus only the budgets needing attention |
+| `GET` `PATCH` `DELETE` | `/budgets/:id` | Read / update / remove |
+
+Budgets store only the rule. Spent, remaining, and status are computed on read
+from the same aggregation the analytics endpoints use — so a transfer can never
+consume a budget, and re-categorising a transaction is reflected immediately. A
+stored running total would need updating on every create, edit, delete and
+re-categorisation, and would rot the first time one of those paths missed it.
+
+Status is `OK`, `WARNING` past 80%, `OVER` past 100%. `rollover: true` carries
+unspent budget forward from every completed period since `startDate` — and the
+carry is allowed to go negative, because overspending really does leave you
+less to spend next month.
+
+Add `?at=2026-06-15` to evaluate a budget as of a period that has already
+closed.
+
+### Investments
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/investments/portfolio` | Positions, valuation, allocation |
+| `GET` | `/investments/performance` | XIRR, absolute return, realised/unrealised |
+| `POST` | `/investments/prices/refresh` | Force a vendor refresh |
+| `GET` `POST` | `/investments/holdings` | List / create positions |
+| `GET` `PATCH` `DELETE` | `/investments/holdings/:id` | Manage a position |
+| `POST` | `/investments/holdings/:id/rebuild` | Replay trades to repair a position |
+| `GET` `POST` | `/investments/trades` | List / record buys and sells |
+| `GET` `PATCH` `DELETE` | `/investments/trades/:id` | Manage a trade |
+
+**Trades are the source of truth.** A holding's quantity, open lots and
+realised profit are replayed from them on every change, rather than patched in
+place. FIFO means editing or deleting a trade in the middle of the history
+changes which lots later sales consumed, so unwinding one in place would mean
+re-deriving everything after it anyway. Replaying cannot drift.
+
+**Cost basis is FIFO.** Selling 10 of 30 shares bought at three different
+prices has three different answers, and the one you use has tax consequences.
+Lots store their *total* cost, not a per-unit figure — a rounded unit cost
+multiplied back by the quantity loses paise on any lot whose cost does not
+divide evenly.
+
+**XIRR is the number that matters.** A simple percentage gain cannot tell
+₹1,000 growing to ₹1,100 in a month from the same growth over three years. The
+current market value is included as a closing inflow, otherwise the answer
+would describe a portfolio you had already sold. It returns `null` — never a
+fabricated `0` — when the flows cannot produce a rate (a single buy today, or
+no trades at all).
+
+Quantities are integers at 1e-8 scale for the same reason money is, and
+price × quantity is computed in `BigInt`: a ₹1,00,000 share price times 100
+units overflows Number's exact integer range, which would quietly round the
+portfolio value of anyone holding a mid-sized position.
+
+#### Prices
+
+Holdings default to `priceProvider: "manual"` — you set `manualPrice`, nothing
+touches the network, and no API key exists to leak. This is also the only
+workable option for unlisted holdings and many Indian mutual funds.
+
+`coingecko` is a real, keyless adapter for crypto. It needs `providerSymbol`
+set to CoinGecko's own id (`"bitcoin"`, not `"BTC"`), which is required at
+creation time because a lookup keyed on the wrong identifier fails silently
+forever.
+
+Prices are cached with an explicit `asOf` and served for `PRICE_CACHE_TTL_MINUTES`
+before the vendor is asked again. When a vendor fails, the last known price is
+returned marked `stale: true` with the error attached — a valuation from an
+hour ago beats refusing to value the position. A holding with no usable price
+is reported `isPriced: false` with a `null` market value, excluded from net
+worth and from allocation percentages, so "worth nothing" stays
+distinguishable from "unknown".
+
+Set `PRICE_SYNC_ENABLED=true` to run the background refresh. It is a single
+in-process interval — the right size for one server. Running more than one
+instance needs a real queue with a lock, or every instance refreshes every
+symbol and the rate limit arrives that much sooner.
+
+Adding an equity provider means writing a module with the same shape as
+[coingecko.provider.js](src/services/price/coingecko.provider.js) and listing
+it in [price/index.js](src/services/price/index.js).
 
 ### Examples
 
@@ -287,13 +392,40 @@ Format money for display by dividing by 100 — or use `formatMinor` from
 
 ---
 
+## Known limits
+
+Worth knowing before this goes anywhere real:
+
+**Multi-currency is not converted.** Accounts and holdings each carry a
+currency, and a cross-currency transfer requires you to state the destination
+amount — the server will not invent an exchange rate. But totals across
+differently-denominated accounts are summed as plain numbers. If everything you
+own is in one currency this is correct; if not, net worth is wrong. Fixing it
+means an FX rate table and a base-currency conversion at every aggregation.
+
+**The net worth trend is cash only**, for the reason given under Analytics.
+
+**Price sync assumes a single instance**, for the reason given under Prices.
+
+**No unit test runner.** `npm run smoke` drives the real HTTP API end to end,
+which is the coverage that matters most here, but the pure functions — `xirr`,
+`proportionalMinor`, the timezone helpers — have no direct tests. A runner like
+Vitest would pay for itself quickly on those.
+
+---
+
 ## What comes next
 
-**Phase 4 — Budgets.** Per-category monthly caps with overspend alerts. This
-reuses the aggregation in `analytics.service.spendingByCategory` almost
-unchanged; the new work is the budget model and the alert rule.
+The foundations are done; these all build on them without new infrastructure:
 
-**Phase 5 — Investments.** Holdings, buy/sell lots, live prices, XIRR and asset
-allocation. Deliberately last: it is the only domain needing an external price
-API, background sync jobs, caching and rate-limit handling. The `INVESTMENT`
-account type and `Zerodha` seed account are already in place for it.
+- **CSV import** for bank and broker statements. The ledger and the FIFO engine
+  already handle anything an import would produce — the work is parsing and
+  de-duplication.
+- **Recurring transactions.** Rent and salary are already regular in the seed
+  data and could be generated rather than typed.
+- **Goals** — a target amount and date, with progress read from the net worth
+  series that already exists.
+- **An equity price provider**, so Indian stocks and mutual funds get live
+  valuations instead of manual ones. Write a module shaped like the CoinGecko
+  adapter and register it.
+- **Export and reporting.** The aggregations exist; this is formatting.
