@@ -11,6 +11,9 @@ router.use(requireAuth);
 
 router.get("/rates", fxController.list);
 
+// Before "/rates/:base/:quote" so the literal path is not captured.
+router.post("/rates/refresh", fxController.refresh);
+
 // PUT rather than POST: a rate for a pair is a single value being set, not a
 // new record each time.
 router.put("/rates", validate({ body: upsertRateSchema }), fxController.upsert);
