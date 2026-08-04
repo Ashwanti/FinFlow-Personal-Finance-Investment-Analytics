@@ -2,6 +2,7 @@ const env = require("./config/env");
 
 const app = require("./app");
 const { connectDB, disconnectDB } = require("./config/db");
+const priceSync = require("./jobs/priceSync.job");
 
 let server;
 
@@ -13,6 +14,10 @@ async function start() {
   server = app.listen(env.port, () => {
     console.log(`🚀 Server running on http://localhost:${env.port} [${env.nodeEnv}]`);
   });
+
+  // Started after the server is up: a vendor being slow should delay prices,
+  // not the port opening.
+  priceSync.start();
 }
 
 async function shutdown(signal) {
@@ -24,6 +29,8 @@ async function shutdown(signal) {
   }, 10000).unref();
 
   try {
+    priceSync.stop();
+
     if (server) {
       await new Promise((resolve, reject) =>
         server.close((err) => (err ? reject(err) : resolve()))
