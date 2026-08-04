@@ -59,6 +59,11 @@ function toMajor(minor, exponent = DEFAULT_EXPONENT) {
 function formatMinor(minor, exponent = DEFAULT_EXPONENT) {
   const negative = minor < 0;
   const digits = String(Math.abs(minor)).padStart(exponent + 1, "0");
+
+  // A currency with no subunit has no decimal point either — "1000", not
+  // "1000.".
+  if (exponent === 0) return `${negative ? "-" : ""}${digits}`;
+
   const whole = digits.slice(0, digits.length - exponent);
   const fraction = digits.slice(digits.length - exponent);
   return `${negative ? "-" : ""}${whole}.${fraction}`;
@@ -77,4 +82,29 @@ function signedMinor({ type, transferDirection, amountMinor }) {
   throw new Error(`Unknown transaction type: ${type}`);
 }
 
-module.exports = { toMinor, toMajor, formatMinor, signedMinor, MAX_MINOR, DEFAULT_EXPONENT };
+// --- currency-aware wrappers -------------------------------------------------
+// Prefer these wherever the currency is known. The bare functions default to
+// two decimal places, which is right for most currencies and wrong for the yen.
+
+const { currencyExponent } = require("../constants/currencies");
+
+/** 1000, "JPY" -> 1000 (no subunit) · 250.5, "INR" -> 25050 */
+const toMinorIn = (major, currency) => toMinor(major, currencyExponent(currency));
+
+/** 25050, "INR" -> 250.5 */
+const toMajorIn = (minor, currency) => toMajor(minor, currencyExponent(currency));
+
+/** 25050, "INR" -> "250.50" · 1000, "JPY" -> "1000" */
+const formatMinorIn = (minor, currency) => formatMinor(minor, currencyExponent(currency));
+
+module.exports = {
+  toMinor,
+  toMajor,
+  formatMinor,
+  toMinorIn,
+  toMajorIn,
+  formatMinorIn,
+  signedMinor,
+  MAX_MINOR,
+  DEFAULT_EXPONENT,
+};
