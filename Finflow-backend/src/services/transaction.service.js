@@ -5,7 +5,7 @@ const Account = require("../models/account.model");
 const Category = require("../models/category.model");
 const Transaction = require("../models/transaction.model");
 const ApiError = require("../utils/ApiError");
-const { signedMinor } = require("../utils/money");
+const { signedMinor, toMinorIn } = require("../utils/money");
 const { withTransaction } = require("../utils/withTransaction");
 
 const POPULATE = [
@@ -40,6 +40,20 @@ async function loadCategory(userId, categoryId, type) {
 
 const reload = (id) => Transaction.findById(id).populate(POPULATE);
 
+/**
+ * Resolves the caller's amount into minor units of `currency`.
+ *
+ * Done here rather than in the controller because the number of decimal places
+ * depends on the currency, and the currency belongs to the account — which the
+ * controller has not loaded. Converting 1000 at a flat x100 would turn ¥1000
+ * into ¥100,000.
+ */
+function resolveAmountMinor(input, currency, { key = "amount", minorKey = "amountMinor" } = {}) {
+  if (input[minorKey] !== undefined) return input[minorKey];
+  if (input[key] === undefined) return undefined;
+  return toMinorIn(input[key], currency);
+}
+
 // ---------------------------------------------------------------------------
 // Income & expense
 // ---------------------------------------------------------------------------
@@ -60,7 +74,7 @@ async function create(userId, input) {
           account: account._id,
           category: category._id,
           type: input.type,
-          amountMinor: input.amountMinor,
+          amountMinor: resolveAmountMinor(input, account.currency),
           currency: account.currency,
           description: input.description ?? "",
           notes: input.notes ?? "",
@@ -114,7 +128,13 @@ async function update(userId, transactionId, updates) {
     }
 
     transaction.type = nextType;
-    for (const field of ["amountMinor", "description", "notes", "date", "tags"]) {
+
+    // Resolved against the transaction's currency after any account change, so
+    // moving a row to a differently-denominated account reads the new one.
+    const amountMinor = resolveAmountMinor(updates, transaction.currency);
+    if (amountMinor !== undefined) transaction.amountMinor = amountMinor;
+
+    for (const field of ["description", "notes", "date", "tags"]) {
       if (updates[field] !== undefined) transaction[field] = updates[field];
     }
 
@@ -167,14 +187,20 @@ async function createTransfer(userId, input) {
     const to = await loadAccount(userId, input.toAccountId, session, "Destination account");
 
     const sameCurrency = from.currency === to.currency;
-    if (!sameCurrency && input.toAmountMinor === undefined) {
+    const outAmountMinor = resolveAmountMinor(input, from.currency);
+    const inAmountMinor = resolveAmountMinor(input, to.currency, {
+      key: "toAmount",
+      minorKey: "toAmountMinor",
+    });
+
+    if (!sameCurrency && inAmountMinor === undefined) {
       throw ApiError.badRequest(
-        `Transferring ${from.currency} to ${to.currency} requires 'toAmountMinor' — the amount that lands in the destination account`
+        `Transferring ${from.currency} to ${to.currency} requires 'toAmount' — the amount that lands in the destination account`
       );
     }
 
     const transferGroupId = new mongoose.Types.ObjectId();
-    const toAmountMinor = input.toAmountMinor ?? input.amountMinor;
+    const toAmountMinor = inAmountMinor ?? outAmountMinor;
 
     const shared = {
       user: userId,
@@ -194,7 +220,7 @@ async function createTransfer(userId, input) {
           account: from._id,
           counterAccount: to._id,
           transferDirection: TRANSFER_DIRECTIONS.OUT,
-          amountMinor: input.amountMinor,
+          amountMinor: outAmountMinor,
           currency: from.currency,
         },
         {
@@ -209,7 +235,7 @@ async function createTransfer(userId, input) {
       { session, ordered: true }
     );
 
-    await applyBalance(from._id, -input.amountMinor, session);
+    await applyBalance(from._id, -outAmountMinor, session);
     await applyBalance(to._id, toAmountMinor, session);
 
     return transferGroupId;
@@ -247,7 +273,14 @@ async function updateTransfer(userId, groupId, updates) {
 
     for (const leg of legs) {
       const isOut = leg.transferDirection === TRANSFER_DIRECTIONS.OUT;
-      const nextAmount = isOut ? updates.amountMinor : updates.toAmountMinor ?? updates.amountMinor;
+      // Each leg resolves against its own currency — the two sides of a
+      // cross-currency transfer are denominated differently by definition.
+      const nextAmount = isOut
+        ? resolveAmountMinor(updates, leg.currency)
+        : resolveAmountMinor(updates, leg.currency, {
+            key: "toAmount",
+            minorKey: "toAmountMinor",
+          }) ?? resolveAmountMinor(updates, leg.currency);
 
       if (nextAmount !== undefined && nextAmount !== leg.amountMinor) {
         await applyBalance(leg.account, -signedMinor(leg), session);

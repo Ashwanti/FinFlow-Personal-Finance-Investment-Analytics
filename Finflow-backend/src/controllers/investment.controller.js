@@ -1,13 +1,14 @@
 const holdingService = require("../services/holding.service");
 const portfolioService = require("../services/portfolio.service");
 const tradeService = require("../services/trade.service");
-const { toMinor } = require("../utils/money");
 const { toScaled } = require("../utils/quantity");
 
 /**
- * Normalises the human-friendly spellings into the canonical scaled integers
- * before anything downstream sees them, so services only ever deal in
- * integers — the same contract the transaction controller enforces for money.
+ * Scales quantity here, but leaves money alone.
+ *
+ * Quantity has one fixed scale for every instrument, so it can be resolved
+ * without context. Prices and fees cannot: their decimal places depend on the
+ * holding's currency, which only the service loads.
  */
 function normalise(body) {
   const input = { ...body };
@@ -15,18 +16,6 @@ function normalise(body) {
   if (input.quantity !== undefined) {
     input.quantityScaled = toScaled(input.quantity);
     delete input.quantity;
-  }
-  if (input.price !== undefined) {
-    input.pricePerUnitMinor = toMinor(input.price);
-    delete input.price;
-  }
-  if (input.fees !== undefined) {
-    input.feesMinor = toMinor(input.fees);
-    delete input.fees;
-  }
-  if (input.manualPrice !== undefined) {
-    input.manualPriceMinor = toMinor(input.manualPrice);
-    delete input.manualPrice;
   }
 
   return input;
@@ -126,6 +115,15 @@ async function refreshPrices(req, res) {
   res.status(200).json({ success: true, data });
 }
 
+async function backfillPrices(req, res) {
+  const data = await portfolioService.backfillSnapshots(req.user);
+  res.status(200).json({
+    success: true,
+    message: "Price history rebuilt from trade records",
+    data,
+  });
+}
+
 module.exports = {
   listHoldings,
   createHolding,
@@ -141,4 +139,5 @@ module.exports = {
   portfolio,
   performance,
   refreshPrices,
+  backfillPrices,
 };

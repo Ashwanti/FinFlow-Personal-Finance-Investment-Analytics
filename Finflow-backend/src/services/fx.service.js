@@ -1,3 +1,5 @@
+const env = require("../config/env");
+const { currencyExponent } = require("../constants/currencies");
 const ExchangeRate = require("../models/exchangeRate.model");
 const ApiError = require("../utils/ApiError");
 
@@ -74,10 +76,21 @@ function convertMinor(amountMinor, from, to, rates) {
   const rate = findRate(rates, from, to);
   if (rate === null) return null;
 
-  const product = BigInt(Math.round(amountMinor)) * BigInt(rate);
-  const scale = BigInt(RATE_SCALE);
-  const half = scale / 2n;
-  const rounded = product >= 0n ? (product + half) / scale : (product - half) / scale;
+  // A rate is quoted between *major* units, so converting minor units has to
+  // account for the two currencies having different numbers of decimal places.
+  // ¥1000 is 1000 minor units; ₹550 is 55000. Treating both as hundredths
+  // would report the yen balance at a hundredth of its value.
+  const shift = currencyExponent(to) - currencyExponent(from);
+
+  let numerator = BigInt(Math.round(amountMinor)) * BigInt(rate);
+  let denominator = BigInt(RATE_SCALE);
+
+  if (shift > 0) numerator *= 10n ** BigInt(shift);
+  else if (shift < 0) denominator *= 10n ** BigInt(-shift);
+
+  const half = denominator / 2n;
+  const rounded =
+    numerator >= 0n ? (numerator + half) / denominator : (numerator - half) / denominator;
 
   return Number(rounded);
 }
@@ -118,9 +131,33 @@ function mergeUnconverted(...lists) {
 
 // ---------------------------------------------------------------------------
 
-async function list(userId) {
+/**
+ * How old a rate is, and whether that is old enough to distrust.
+ *
+ * A rate entered once and never revisited keeps converting quietly and
+ * wrongly. Age is the only signal that distinguishes "83.5 is the rate" from
+ * "83.5 was the rate last March", so it is reported rather than assumed.
+ */
+function withAge(rate, maxAgeHours) {
+  const ageHours = (Date.now() - rate.asOf.getTime()) / 3600000;
+  return {
+    ...rate.toJSON(),
+    ageHours: Math.round(ageHours * 10) / 10,
+    stale: ageHours > maxAgeHours,
+  };
+}
+
+async function list(userId, { maxAgeHours = env.fx.maxAgeHours } = {}) {
   const rates = await ExchangeRate.find({ user: userId }).sort({ base: 1, quote: 1 });
-  return rates.map((rate) => rate.toJSON());
+  return rates.map((rate) => withAge(rate, maxAgeHours));
+}
+
+/** Pairs whose stored rate is older than the configured tolerance. */
+async function staleRates(userId, { maxAgeHours = env.fx.maxAgeHours } = {}) {
+  const rates = await list(userId, { maxAgeHours });
+  return rates
+    .filter((rate) => rate.stale)
+    .map(({ base, quote, asOf, ageHours, source }) => ({ base, quote, asOf, ageHours, source }));
 }
 
 async function upsert(userId, { base, quote, rateScaled, asOf, source }) {
@@ -159,6 +196,7 @@ module.exports = {
   sumConverted,
   mergeUnconverted,
   list,
+  staleRates,
   upsert,
   remove,
 };
