@@ -35,8 +35,8 @@ or create a free cluster on MongoDB Atlas.
 |---|---|
 | `npm run dev` | Start with nodemon, reloading on change |
 | `npm start` | Start for production |
-| `npm test` | 62 unit tests over the pure functions (no database) |
-| `npm run smoke` | 289-check end-to-end test against an in-memory MongoDB |
+| `npm test` | 82 unit tests over the pure functions (no database) |
+| `npm run smoke` | 314-check end-to-end test against an in-memory MongoDB |
 | `npm run check` | Both of the above |
 | `npm run seed` | Fill your database with 6 months of realistic demo data |
 
@@ -235,8 +235,9 @@ valuation arriving.
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| `GET` | `/fx/rates` | Every rate you have set |
+| `GET` | `/fx/rates` | Every rate you have set, with its age |
 | `PUT` | `/fx/rates` | Set a rate for a pair (`{"base":"USD","quote":"INR","rate":83.5}`) |
+| `POST` | `/fx/rates/refresh` | Pull fresh rates from the configured feed |
 | `DELETE` | `/fx/rates/:base/:quote` | Remove one |
 
 Accounts, transactions and holdings each carry their own currency, and every
@@ -253,6 +254,23 @@ Rates are per-user and stored as scaled integers — a rate multiplies every
 figure it touches, so drift in it propagates everywhere. Inverses are derived
 automatically (`USD/INR` also gives you `INR/USD`), and pairs you have not
 entered are triangulated through your base currency where possible.
+
+**Minor units are per currency.** The yen has no subunit — ¥1000 is 1000 minor
+units, not 100000 — and Kuwait quotes three decimals. Conversion accounts for
+the difference, and so does turning a submitted `amount` into storage, which is
+why that conversion happens in the service (where the account's currency is
+known) rather than in the controller.
+
+**Rates go stale, and stale is reported.** Every rate carries `ageHours` and a
+`stale` flag past `FX_RATE_MAX_AGE_HOURS`, and any response that relied on one
+lists it under `staleRates`. A stale rate is still used — it beats none — but a
+rate entered once and never revisited would otherwise keep converting quietly
+and wrongly forever.
+
+Set `FX_PROVIDER=frankfurter` for ECB reference rates: no API key, around thirty
+major currencies, one fixing per weekday. That makes it a valuation rate, not a
+dealing rate, and anything outside its coverage stays manual. `FX_SYNC_ENABLED=true`
+refreshes on a timer, under the same lease as the price job.
 
 ### Budgets
 
@@ -337,18 +355,34 @@ Every price established — from a vendor or set by hand — is also written to 
 daily **snapshot**, which is what makes the historical net worth trend possible.
 A live quote only tells you what something is worth now; what it was worth in
 March cannot be reconstructed afterwards, so it has to be recorded as it
-happens. Snapshots start from the day an instrument is first priced, and the
-trend carries anything earlier at cost rather than back-filling today's price
-across months it was never worth that much.
+happens.
+
+**Trades count as price observations.** Someone paid ₹1,420 for it on that
+date, which is exactly what a snapshot records — so recording a trade also
+records history, and most of what the trend needs is already in the ledger
+rather than something to buy or wait for. `POST /investments/prices/backfill`
+rebuilds snapshots from every trade you have.
+
+That also makes the last recorded price the universal fallback: a holding with
+no live mark is valued at what it last changed hands for, flagged `stale` with
+the reason. Only a position that has never had an observed price — a bonus
+issue, an imported holding — comes back `isPriced: false`, and those are
+excluded from net worth and allocation rather than counted as zero.
 
 Set `PRICE_SYNC_ENABLED=true` to run the background refresh. It is **safe on
 more than one instance**: each tick takes a lease in MongoDB and only the winner
 does the work. Without that, every instance refreshes every symbol on its own
 timer and the vendor sees N times the traffic, so a free tier's rate limit
-arrives N times sooner. The lease expires, so an instance that dies mid-run
-cannot wedge the job — the guarantee is "almost always one runner", which is the
-right level for refreshing a cache. Anything needing exactly-once wants a real
-queue.
+arrives N times sooner.
+
+The lease expires, so an instance that dies mid-run cannot wedge the job, and it
+is renewed on a heartbeat for as long as the work runs, so a job that
+legitimately overruns its TTL keeps the lock instead of having it stolen. For
+the case neither covers — a process frozen long enough to miss several
+heartbeats — each lease carries a **fence** that increments on every
+acquisition. Expiry tells a holder when its lease ran out; the fence tells it
+whether anyone else actually took over, which is the question that matters
+before writing. `withLock` hands `fn` a `stillHolds()` for exactly that check.
 
 Adding an equity provider means writing a module with the same shape as
 [coingecko.provider.js](src/services/price/coingecko.provider.js) and listing
@@ -438,21 +472,23 @@ Format money for display by dividing by 100 — or use `formatMinor` from
 
 Worth knowing before this goes anywhere real:
 
-**Rates are whatever you enter.** There is no FX feed, so conversions are only
-as current as the rates you set — and a stale rate quietly misstates every
-converted total. The fix is an adapter alongside the price providers.
+**The FX feed covers about thirty currencies.** ECB reference rates are wide
+but not universal; anything outside that stays manual, and manual rates go stale
+unless you revisit them. The staleness flag makes that visible rather than
+solving it.
 
-**Historical prices only exist from the day you start recording them.** Trend
-points before an instrument was first priced are carried at cost and labelled
-`COST`. Nothing back-fills them, because nothing honestly can.
+**A reference rate is not a dealing rate.** ECB publishes one mid-market fixing
+per weekday. That is right for valuing a portfolio and wrong for reconciling
+what your bank actually charged you.
 
-**The job lease is a lease, not a mutex.** It expires, so in a pathological case
-— a process pausing longer than the TTL mid-run — two instances could overlap.
-That is the right trade for refreshing a price cache and the wrong one for
-anything with side effects that must not repeat.
+**History still starts somewhere.** Trades give the trend real history without a
+vendor, but a holding acquired before you started recording — an imported
+position with no trade — has nothing to value it from until it is priced once.
 
-**Minor units are assumed to share an exponent.** Every currency here is
-two-decimal. A zero-decimal currency like JPY would convert incorrectly.
+**Cross-currency transfers do not use the rate table.** They still require an
+explicit destination amount. That is deliberate: the money that actually landed
+is a fact, and deriving it from a mid-market rate would quietly disagree with
+the statement.
 
 ---
 
