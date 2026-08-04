@@ -35,11 +35,16 @@ or create a free cluster on MongoDB Atlas.
 |---|---|
 | `npm run dev` | Start with nodemon, reloading on change |
 | `npm start` | Start for production |
-| `npm run smoke` | 248-check end-to-end test against an in-memory MongoDB |
+| `npm test` | 62 unit tests over the pure functions (no database) |
+| `npm run smoke` | 289-check end-to-end test against an in-memory MongoDB |
+| `npm run check` | Both of the above |
 | `npm run seed` | Fill your database with 6 months of realistic demo data |
 
-`npm run smoke` needs no database and no configuration — it is the fastest way
-to confirm a change did not break anything.
+`npm test` runs in about a tenth of a second and covers the arithmetic — money
+conversion, scaled quantities, FIFO cost splitting, XIRR, timezone boundaries.
+`npm run smoke` needs no database and no configuration either; it drives the
+real HTTP API end to end. Between them, `npm run check` is the fastest way to
+confirm a change did not break anything.
 
 `npm run seed` creates `demo@finflow.test` / `Demo1234` with four accounts and
 ~90 transactions, so the frontend has something real to render. Re-running
@@ -219,10 +224,35 @@ without polluting income or expense. `savingsRatePct` is `null`, not `0`, when
 there was no income — "0% saved" would be a claim the data cannot support.
 
 Net worth has no stored history; the trend walks backwards from today's balance
-and unwinds each month's movements. It reports `includesInvestments: false` —
-historical *market* prices are not stored either, and folding today's market
-value into a series built from past cashflows would invent a jump wherever the
-data happens to start.
+and unwinds each month's movements. Investments are included: positions at any
+past date are replayed exactly from trades, and priced from recorded snapshots
+(see below). Each point carries `cashMinor`, `investmentsMinor`,
+`investmentCostMinor` and an `investmentBasis` of `MARKET`, `COST`, `MIXED` or
+`NONE`, so a rise is never mistaken for a gain that was really just the first
+valuation arriving.
+
+### Currencies
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/fx/rates` | Every rate you have set |
+| `PUT` | `/fx/rates` | Set a rate for a pair (`{"base":"USD","quote":"INR","rate":83.5}`) |
+| `DELETE` | `/fx/rates/:base/:quote` | Remove one |
+
+Accounts, transactions and holdings each carry their own currency, and every
+aggregate converts into your base currency before totalling. Adding ₹1,000 to
+$1,000 and reporting 2,000 is the same class of error as counting a transfer as
+income — a number that looks fine and is simply wrong.
+
+**A missing rate is reported, never guessed.** Amounts the server cannot
+convert are excluded from the total and listed under `unconverted` on the
+response. An invented rate produces a confident, wrong net worth; an excluded
+amount produces a total you know is partial.
+
+Rates are per-user and stored as scaled integers — a rate multiplies every
+figure it touches, so drift in it propagates everywhere. Inverses are derived
+automatically (`USD/INR` also gives you `INR/USD`), and pairs you have not
+entered are triangulated through your base currency where possible.
 
 ### Budgets
 
@@ -303,10 +333,22 @@ is reported `isPriced: false` with a `null` market value, excluded from net
 worth and from allocation percentages, so "worth nothing" stays
 distinguishable from "unknown".
 
-Set `PRICE_SYNC_ENABLED=true` to run the background refresh. It is a single
-in-process interval — the right size for one server. Running more than one
-instance needs a real queue with a lock, or every instance refreshes every
-symbol and the rate limit arrives that much sooner.
+Every price established — from a vendor or set by hand — is also written to a
+daily **snapshot**, which is what makes the historical net worth trend possible.
+A live quote only tells you what something is worth now; what it was worth in
+March cannot be reconstructed afterwards, so it has to be recorded as it
+happens. Snapshots start from the day an instrument is first priced, and the
+trend carries anything earlier at cost rather than back-filling today's price
+across months it was never worth that much.
+
+Set `PRICE_SYNC_ENABLED=true` to run the background refresh. It is **safe on
+more than one instance**: each tick takes a lease in MongoDB and only the winner
+does the work. Without that, every instance refreshes every symbol on its own
+timer and the vendor sees N times the traffic, so a free tier's rate limit
+arrives N times sooner. The lease expires, so an instance that dies mid-run
+cannot wedge the job — the guarantee is "almost always one runner", which is the
+right level for refreshing a cache. Anything needing exactly-once wants a real
+queue.
 
 Adding an equity provider means writing a module with the same shape as
 [coingecko.provider.js](src/services/price/coingecko.provider.js) and listing
@@ -396,21 +438,21 @@ Format money for display by dividing by 100 — or use `formatMinor` from
 
 Worth knowing before this goes anywhere real:
 
-**Multi-currency is not converted.** Accounts and holdings each carry a
-currency, and a cross-currency transfer requires you to state the destination
-amount — the server will not invent an exchange rate. But totals across
-differently-denominated accounts are summed as plain numbers. If everything you
-own is in one currency this is correct; if not, net worth is wrong. Fixing it
-means an FX rate table and a base-currency conversion at every aggregation.
+**Rates are whatever you enter.** There is no FX feed, so conversions are only
+as current as the rates you set — and a stale rate quietly misstates every
+converted total. The fix is an adapter alongside the price providers.
 
-**The net worth trend is cash only**, for the reason given under Analytics.
+**Historical prices only exist from the day you start recording them.** Trend
+points before an instrument was first priced are carried at cost and labelled
+`COST`. Nothing back-fills them, because nothing honestly can.
 
-**Price sync assumes a single instance**, for the reason given under Prices.
+**The job lease is a lease, not a mutex.** It expires, so in a pathological case
+— a process pausing longer than the TTL mid-run — two instances could overlap.
+That is the right trade for refreshing a price cache and the wrong one for
+anything with side effects that must not repeat.
 
-**No unit test runner.** `npm run smoke` drives the real HTTP API end to end,
-which is the coverage that matters most here, but the pure functions — `xirr`,
-`proportionalMinor`, the timezone helpers — have no direct tests. A runner like
-Vitest would pay for itself quickly on those.
+**Minor units are assumed to share an exponent.** Every currency here is
+two-decimal. A zero-decimal currency like JPY would convert incorrectly.
 
 ---
 
@@ -427,5 +469,5 @@ The foundations are done; these all build on them without new infrastructure:
   series that already exists.
 - **An equity price provider**, so Indian stocks and mutual funds get live
   valuations instead of manual ones. Write a module shaped like the CoinGecko
-  adapter and register it.
+  adapter and register it. The same seam suits an FX feed.
 - **Export and reporting.** The aggregations exist; this is formatting.
