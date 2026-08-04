@@ -235,6 +235,8 @@ module.exports = async function investmentSuite(ctx) {
     refresh.json?.data
   );
 
+  // No manual price, but a real purchase — so the trade itself is the only
+  // price this instrument has ever had.
   const unpricedRes = await call("POST", "/api/investments/holdings", {
     ...auth,
     body: { accountId: broker.id, symbol: "UNLISTED", assetClass: "OTHER" },
@@ -246,16 +248,43 @@ module.exports = async function investmentSuite(ctx) {
   });
 
   const withUnpriced = await call("GET", "/api/investments/portfolio", auth);
-  const unpricedPosition = withUnpriced.json?.data?.positions?.find((p) => p.symbol === "UNLISTED");
-  check("an unvalued position is flagged", unpricedPosition?.isPriced === false, unpricedPosition);
-  check("its market value is null, not zero", unpricedPosition?.marketValueMinor === null);
-  check("it explains why", !!unpricedPosition?.price?.error, unpricedPosition?.price);
+  const tradedPosition = withUnpriced.json?.data?.positions?.find((p) => p.symbol === "UNLISTED");
   check("the portfolio still renders", withUnpriced.status === 200);
-  check("and counts what it could not value", withUnpriced.json?.data?.unpricedCount === 1, withUnpriced.json?.data);
+  check(
+    "a holding with no mark is valued at what it last traded for",
+    tradedPosition?.marketValueMinor === 50000,
+    tradedPosition
+  );
+  check("the fallback is marked stale", tradedPosition?.price?.stale === true, tradedPosition?.price);
+  check("and explains itself", /last recorded price/i.test(tradedPosition?.price?.error || ""), tradedPosition?.price);
+
+  // A bonus issue: units arrived at no cost and never traded, so nothing has
+  // ever observed a price for them.
+  const bonusRes = await call("POST", "/api/investments/holdings", {
+    ...auth,
+    body: { accountId: broker.id, symbol: "BONUS", assetClass: "OTHER" },
+  });
+  await call("POST", "/api/investments/trades", {
+    ...auth,
+    body: {
+      holdingId: bonusRes.json?.data?.holding?.id,
+      type: "BUY",
+      quantity: 5,
+      price: 0,
+      date: daysAgo(5),
+    },
+  });
+
+  const withBonus = await call("GET", "/api/investments/portfolio", auth);
+  const bonusPosition = withBonus.json?.data?.positions?.find((p) => p.symbol === "BONUS");
+  check("a genuinely unvalued position is flagged", bonusPosition?.isPriced === false, bonusPosition);
+  check("its market value is null, not zero", bonusPosition?.marketValueMinor === null);
+  check("it explains why", !!bonusPosition?.price?.error, bonusPosition?.price);
+  check("and counts what it could not value", withBonus.json?.data?.unpricedCount === 1, withBonus.json?.data);
   check(
     "allocation ignores unpriced positions rather than sinking them to zero",
-    withUnpriced.json?.data?.allocation?.every((slice) => slice.assetClass !== "OTHER"),
-    withUnpriced.json?.data?.allocation
+    withBonus.json?.data?.allocation?.every((slice) => slice.positions > 0),
+    withBonus.json?.data?.allocation
   );
 
   section("Replay keeps everything consistent");

@@ -169,4 +169,107 @@ module.exports = async function multiCurrencySuite(ctx) {
 
   const missing = await call("DELETE", "/api/fx/rates/USD/INR", auth);
   check("deleting a missing rate is a 404", missing.status === 404, missing.json);
+
+  section("A currency with no minor unit");
+
+  // Its own user so the earlier balances stay exact.
+  const jpyUser = await call("POST", "/api/auth/register", {
+    body: {
+      name: "Yen Holder",
+      email: `jpy+${Date.now()}@smoke.test`,
+      password: "Passw0rd123",
+      baseCurrency: "INR",
+    },
+  });
+  const jpyAuth = { token: jpyUser.json?.data?.accessToken };
+
+  // ¥100,000 is 100000 minor units, because the yen has no subunit.
+  const jpyAccount = await call("POST", "/api/accounts", {
+    ...jpyAuth,
+    body: { name: "MUFG", type: "BANK", currency: "JPY", openingBalanceMinor: 100000 },
+  });
+  const yen = jpyAccount.json?.data?.account ?? {};
+
+  await call("PUT", "/api/fx/rates", {
+    ...jpyAuth,
+    body: { base: "JPY", quote: "INR", rate: 0.55 },
+  });
+
+  const jpyWorth = await call("GET", "/api/analytics/net-worth", jpyAuth);
+  check(
+    "¥100,000 converts to ₹55,000, not ₹550",
+    jpyWorth.json?.data?.totalMinor === 5500000,
+    jpyWorth.json?.data
+  );
+
+  const jpyCats = await call("GET", "/api/categories?kind=EXPENSE", jpyAuth);
+  const jpyGroceries = (jpyCats.json?.data?.categories ?? []).find((c) => c.name === "Groceries");
+
+  const jpySpend = await call("POST", "/api/transactions", {
+    ...jpyAuth,
+    body: {
+      type: "EXPENSE",
+      accountId: yen.id,
+      categoryId: jpyGroceries.id,
+      amount: 1000, // ¥1000
+      date: new Date().toISOString(),
+    },
+  });
+  check(
+    "an amount of 1000 in a JPY account stores 1000 minor units",
+    jpySpend.json?.data?.transaction?.amountMinor === 1000,
+    jpySpend.json?.data?.transaction
+  );
+
+  const afterSpend = await call("GET", `/api/accounts/${yen.id}`, jpyAuth);
+  check("the yen balance drops by ¥1000", afterSpend.json?.data?.account?.balanceMinor === 99000);
+
+  const jpySummary = await call("GET", "/api/analytics/summary", jpyAuth);
+  check(
+    "¥1000 of spending reports as ₹550",
+    jpySummary.json?.data?.expenseMinor === 55000,
+    jpySummary.json?.data
+  );
+
+  section("Rate freshness");
+
+  const listed = await call("GET", "/api/fx/rates", jpyAuth);
+  check("rates report their age", typeof listed.json?.data?.rates?.[0]?.ageHours === "number", listed.json?.data);
+  check("a rate just set is not stale", listed.json?.data?.rates?.[0]?.stale === false);
+  check("the configured provider is reported", typeof listed.json?.data?.provider === "string");
+
+  const old = await call("PUT", "/api/fx/rates", {
+    ...jpyAuth,
+    body: {
+      base: "JPY",
+      quote: "INR",
+      rate: 0.55,
+      asOf: new Date(Date.now() - 30 * 86400000).toISOString(),
+    },
+  });
+  check("a rate can be backdated", old.status === 200, old.json);
+
+  const stale = await call("GET", "/api/fx/rates", jpyAuth);
+  check("a month-old rate is flagged stale", stale.json?.data?.rates?.[0]?.stale === true, stale.json?.data?.rates);
+  check("and counted", stale.json?.data?.staleCount === 1, stale.json?.data);
+
+  const staleWorth = await call("GET", "/api/analytics/net-worth", jpyAuth);
+  check(
+    "net worth still converts with a stale rate",
+    staleWorth.json?.data?.totalMinor === Math.round(99000 * 0.55 * 100),
+    staleWorth.json?.data
+  );
+  check(
+    "but names the stale pair",
+    staleWorth.json?.data?.staleRates?.[0]?.quote === "INR",
+    staleWorth.json?.data?.staleRates
+  );
+
+  const refresh = await call("POST", "/api/fx/rates/refresh", jpyAuth);
+  check("refresh returns 200", refresh.status === 200, refresh.json);
+  check(
+    "with no feed configured it reports that rather than failing",
+    refresh.json?.data?.skipped === true,
+    refresh.json?.data
+  );
 };
