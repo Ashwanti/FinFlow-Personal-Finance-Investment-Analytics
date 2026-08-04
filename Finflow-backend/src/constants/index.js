@@ -37,6 +37,55 @@ const INTERVALS = {
   YEAR: "year",
 };
 
+/** Budget periods, named for users but mapped onto $dateTrunc units. */
+const BUDGET_PERIODS = {
+  WEEKLY: "WEEKLY",
+  MONTHLY: "MONTHLY",
+  YEARLY: "YEARLY",
+};
+
+const BUDGET_PERIOD_UNITS = {
+  WEEKLY: INTERVALS.WEEK,
+  MONTHLY: INTERVALS.MONTH,
+  YEARLY: INTERVALS.YEAR,
+};
+
+const BUDGET_STATUS = {
+  OK: "OK",
+  WARNING: "WARNING",
+  OVER: "OVER",
+};
+
+// Share of the cap at which a budget starts warning.
+const BUDGET_WARNING_THRESHOLD = 0.8;
+
+const ASSET_CLASSES = {
+  EQUITY: "EQUITY",
+  MUTUAL_FUND: "MUTUAL_FUND",
+  ETF: "ETF",
+  BOND: "BOND",
+  CRYPTO: "CRYPTO",
+  OTHER: "OTHER",
+};
+
+const TRADE_TYPES = {
+  BUY: "BUY",
+  SELL: "SELL",
+};
+
+/**
+ * Where a holding's current price comes from.
+ *
+ * `manual` is the default and needs no network: the user states the price.
+ * Everything else is a vendor adapter that can fail, rate-limit or go stale,
+ * which is why price data lives in a cache with an explicit asOf rather than
+ * being fetched inline on a page load.
+ */
+const PRICE_PROVIDERS = {
+  MANUAL: "manual",
+  COINGECKO: "coingecko",
+};
+
 /** Seeded on registration so a new account is usable immediately. */
 const DEFAULT_CATEGORIES = [
   { name: "Salary", kind: CATEGORY_KINDS.INCOME, icon: "💼", color: "#16a34a" },
@@ -63,4 +112,11 @@ module.exports = {
   ACCOUNT_TYPES,
   INTERVALS,
   DEFAULT_CATEGORIES,
+  BUDGET_PERIODS,
+  BUDGET_PERIOD_UNITS,
+  BUDGET_STATUS,
+  BUDGET_WARNING_THRESHOLD,
+  ASSET_CLASSES,
+  TRADE_TYPES,
+  PRICE_PROVIDERS,
 };
