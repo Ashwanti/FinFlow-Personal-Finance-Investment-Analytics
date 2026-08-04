@@ -6,7 +6,7 @@
  * trend ignoring investments, and price sync being unsafe on more than one
  * instance.
  */
-const { withLock, acquire, release } = require("../../src/utils/jobLock");
+const { withLock, acquire, release, stillHolds } = require("../../src/utils/jobLock");
 const priceSync = require("../../src/jobs/priceSync.job");
 
 module.exports = async function historySuite(ctx) {
@@ -102,35 +102,81 @@ module.exports = async function historySuite(ctx) {
   const mixed = await call("GET", "/api/analytics/net-worth/trend?months=4", auth);
   const mixedLatest = mixed.json?.data?.series?.at(-1);
   check(
-    "a position with no price is carried at cost",
+    "the second holding is valued from its own trade price",
     mixedLatest?.investmentsMinor === 1200000 + 100000,
     mixedLatest
   );
-  check("and the point is labelled MIXED", mixedLatest?.investmentBasis === "MIXED", mixedLatest);
   check(
     "cost is reported alongside value",
     mixedLatest?.investmentCostMinor === 1000000 + 100000,
     mixedLatest
   );
 
+  const worthWithBoth = await call("GET", "/api/analytics/net-worth", auth);
+  check(
+    "the trend and current net worth still agree",
+    mixedLatest?.netWorthMinor === worthWithBoth.json?.data?.totalMinor,
+    { trend: mixedLatest?.netWorthMinor, current: worthWithBoth.json?.data?.totalMinor }
+  );
+
+  section("Trades are themselves price history");
+
+  // The trade above was at ₹1000 sixty days ago, and the holding is marked at
+  // ₹1200 today. The earlier months should be valued at the traded price, not
+  // at today's mark — history exists because the trade recorded it.
+  const backfill = await call("POST", "/api/investments/prices/backfill", auth);
+  check("backfill returns 200", backfill.status === 200, backfill.json);
+  check("it records one snapshot per priced trade", backfill.json?.data?.snapshots === 2, backfill.json?.data);
+
+  // Three months back from today, the first bucket closes before the second
+  // holding was bought, so only the ₹1000 purchase is in it.
+  const historic = await call("GET", "/api/analytics/net-worth/trend?months=3", auth);
+  const oldest = historic.json?.data?.series?.[0];
+  check(
+    "a past month is valued from the traded price, not today's mark",
+    oldest?.investmentsMinor === 1000000,
+    oldest
+  );
+  check("and reports a market basis rather than cost", oldest?.investmentBasis === "MARKET", oldest);
+
   section("Background jobs take a lease");
 
   const first = await acquire("smoke-test-job", 60000);
-  check("the first caller wins the lease", typeof first === "string", first);
+  check("the first caller wins the lease", typeof first?.owner === "string", first);
 
   const second = await acquire("smoke-test-job", 60000);
   check("a second caller is turned away", second === null, second);
 
-  await release("smoke-test-job", first);
+  check("the holder still holds it", await stillHolds("smoke-test-job", first.owner, first.fence));
+
+  await release("smoke-test-job", first.owner, { fence: first.fence });
   const third = await acquire("smoke-test-job", 60000);
-  check("the lease is reusable once released", typeof third === "string", third);
-  await release("smoke-test-job", third);
+  check("the lease is reusable once released", typeof third?.owner === "string", third);
+
+  // The fence is what a stalled holder checks: expiry says when the lease ran
+  // out, the fence says whether anyone else actually took it.
+  check("the fence advances on each acquisition", third.fence > first.fence, {
+    first: first.fence,
+    third: third.fence,
+  });
+  check(
+    "the previous holder can tell it no longer holds the lease",
+    (await stillHolds("smoke-test-job", first.owner, first.fence)) === false
+  );
+  await release("smoke-test-job", third.owner, { fence: third.fence });
 
   // An expired lease must be reclaimable, or a crashed process wedges the job.
   const expired = await acquire("smoke-test-expiry", -1000);
   const reclaimed = await acquire("smoke-test-expiry", 60000);
-  check("an expired lease can be taken over", typeof reclaimed === "string", { expired, reclaimed });
-  await release("smoke-test-expiry", reclaimed);
+  check("an expired lease can be taken over", typeof reclaimed?.owner === "string", {
+    expired,
+    reclaimed,
+  });
+  check(
+    "and the stale holder is fenced out",
+    (await stillHolds("smoke-test-expiry", expired.owner, expired.fence)) === false
+  );
+  await release("smoke-test-expiry", reclaimed.owner, { fence: reclaimed.fence });
 
   let ran = 0;
   const [a, b] = await Promise.all([
