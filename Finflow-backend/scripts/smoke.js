@@ -23,6 +23,8 @@ const SUITES = [
   ["Phase 1 — Auth", require("./suites/auth")],
   ["Phase 2 — Accounts, Categories, Transactions, Transfers", require("./suites/ledger")],
   ["Phase 3 — Analytics", require("./suites/analytics")],
+  ["Phase 4 — Budgets", require("./suites/budgets")],
+  ["Phase 5 — Investments", require("./suites/investments")],
 ];
 
 let passed = 0;
