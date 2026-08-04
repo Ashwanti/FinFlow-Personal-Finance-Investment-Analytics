@@ -1,11 +1,16 @@
 const budgetService = require("../services/budget.service");
-const { toMinor } = require("../utils/money");
+const { toMinorIn } = require("../utils/money");
 
-/** Collapses `amount` (major) into the canonical `amountMinor`. */
-function normaliseAmount(body) {
+/**
+ * Collapses `amount` (major) into `amountMinor`.
+ *
+ * Safe to do here, unlike transactions and trades: a budget is always
+ * denominated in the user's base currency, which the request already carries.
+ */
+function normaliseAmount(body, currency) {
   const input = { ...body };
   if (input.amount !== undefined) {
-    input.amountMinor = toMinor(input.amount);
+    input.amountMinor = toMinorIn(input.amount, currency);
     delete input.amount;
   }
   return input;
@@ -27,7 +32,7 @@ async function get(req, res) {
 }
 
 async function create(req, res) {
-  const budget = await budgetService.create(req.user, normaliseAmount(req.validated.body));
+  const budget = await budgetService.create(req.user, normaliseAmount(req.validated.body, req.user.baseCurrency));
   res.status(201).json({ success: true, data: { budget } });
 }
 
@@ -35,7 +40,7 @@ async function update(req, res) {
   const budget = await budgetService.update(
     req.user,
     req.validated.params.id,
-    normaliseAmount(req.validated.body)
+    normaliseAmount(req.validated.body, req.user.baseCurrency)
   );
   res.status(200).json({ success: true, data: { budget } });
 }

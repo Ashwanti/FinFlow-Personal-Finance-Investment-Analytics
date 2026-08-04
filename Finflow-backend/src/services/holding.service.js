@@ -3,6 +3,7 @@ const Account = require("../models/account.model");
 const Holding = require("../models/holding.model");
 const Trade = require("../models/trade.model");
 const ApiError = require("../utils/ApiError");
+const { toMinorIn } = require("../utils/money");
 const { valueMinor, unitPriceMinor, proportionalMinor } = require("../utils/quantity");
 
 /**
@@ -138,6 +139,13 @@ function positionAt(trades, until) {
   };
 }
 
+/** `manualPrice` (major) or `manualPriceMinor`, resolved against `currency`. */
+function resolveManualPrice(input, currency) {
+  if (input.manualPriceMinor !== undefined) return input.manualPriceMinor;
+  if (input.manualPrice === undefined) return undefined;
+  return toMinorIn(input.manualPrice, currency);
+}
+
 async function getOwned(userId, holdingId, { session = null } = {}) {
   const holding = await Holding.findOne({ _id: holdingId, user: userId }).session(session);
   if (!holding) throw ApiError.notFound("Holding not found");
@@ -181,16 +189,20 @@ async function create(userId, input) {
     throw ApiError.conflict(`A holding for ${symbol} already exists in "${account.name}"`);
   }
 
+  const currency = input.currency || account.currency;
+
   const holding = await Holding.create({
     user: userId,
     account: account._id,
     symbol,
     name: input.name ?? "",
     assetClass: input.assetClass,
-    currency: input.currency || account.currency,
+    currency,
     priceProvider: input.priceProvider,
     providerSymbol: input.providerSymbol ?? "",
-    manualPriceMinor: input.manualPriceMinor ?? null,
+    // Converted here rather than in the controller: the holding's currency
+    // decides how many decimal places a manual price has.
+    manualPriceMinor: resolveManualPrice(input, currency) ?? null,
     notes: input.notes ?? "",
   });
 
@@ -221,12 +233,14 @@ async function update(userId, holdingId, updates) {
     "currency",
     "priceProvider",
     "providerSymbol",
-    "manualPriceMinor",
     "notes",
     "isArchived",
   ]) {
     if (updates[field] !== undefined) holding[field] = updates[field];
   }
+
+  const manualPriceMinor = resolveManualPrice(updates, holding.currency);
+  if (manualPriceMinor !== undefined) holding.manualPriceMinor = manualPriceMinor;
 
   await holding.save();
   await holding.populate("account", "name type currency");
