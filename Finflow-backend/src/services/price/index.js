@@ -1,6 +1,7 @@
 const env = require("../../config/env");
 const { PRICE_PROVIDERS } = require("../../constants");
 const PriceQuote = require("../../models/priceQuote.model");
+const PriceSnapshot = require("../../models/priceSnapshot.model");
 const coingecko = require("./coingecko.provider");
 const manual = require("./manual.provider");
 
@@ -30,20 +31,76 @@ async function readCache(holding) {
   return PriceQuote.findOne(cacheKey(holding));
 }
 
-async function writeCache(holding, quote) {
+const startOfUtcDay = (date) =>
+  new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+
+/**
+ * Records a price for historical use. Called whenever a price is established,
+ * from a vendor or by hand — a trend can only ever show what was written down
+ * at the time.
+ */
+async function recordSnapshot(holding, quote) {
   const key = cacheKey(holding);
-  return PriceQuote.findOneAndUpdate(
-    key,
-    {
-      ...key,
-      priceMinor: quote.priceMinor,
-      asOf: quote.asOf,
-      lastError: null,
-      lastErrorAt: null,
-    },
-    { upsert: true, returnDocument: "after" }
+
+  await PriceSnapshot.updateOne(
+    { ...key, date: startOfUtcDay(quote.asOf ?? new Date()) },
+    { $set: { priceMinor: quote.priceMinor } },
+    { upsert: true }
   );
 }
+
+async function writeCache(holding, quote) {
+  const key = cacheKey(holding);
+
+  const [saved] = await Promise.all([
+    PriceQuote.findOneAndUpdate(
+      key,
+      {
+        ...key,
+        priceMinor: quote.priceMinor,
+        asOf: quote.asOf,
+        lastError: null,
+        lastErrorAt: null,
+      },
+      { upsert: true, returnDocument: "after" }
+    ),
+    recordSnapshot(holding, quote),
+  ]);
+
+  return saved;
+}
+
+/**
+ * Prices for these instruments on or after `since`, oldest first.
+ *
+ * Loaded in one query and walked in memory: a twelve-month trend over a dozen
+ * holdings would otherwise issue hundreds of point lookups.
+ */
+async function loadSnapshots(holdings, since) {
+  if (holdings.length === 0) return new Map();
+
+  const keys = holdings.map((holding) => cacheKey(holding));
+
+  const rows = await PriceSnapshot.find({
+    $or: keys.map((key) => ({ ...key })),
+    date: { $gte: since },
+  }).sort({ date: 1 });
+
+  const byKey = new Map();
+  for (const row of rows) {
+    const id = `${row.provider}|${row.providerSymbol}|${row.currency}`;
+    if (!byKey.has(id)) byKey.set(id, []);
+    byKey.get(id).push({ date: row.date, priceMinor: row.priceMinor });
+  }
+
+  return byKey;
+}
+
+/** The key `loadSnapshots` groups by, so callers can look a holding up. */
+const snapshotKey = (holding) => {
+  const key = cacheKey(holding);
+  return `${key.provider}|${key.providerSymbol}|${key.currency}`;
+};
 
 async function recordFailure(holding, message) {
   const key = cacheKey(holding);
@@ -68,9 +125,12 @@ async function getQuote(holding, { force = false } = {}) {
   // way for the user's own edit to appear not to have taken effect.
   if (!provider.requiresNetwork) {
     const quote = await provider.fetchQuote(holding);
-    return quote
-      ? { ...quote, source: provider.name, stale: false, error: null }
-      : unpriced(holding, "No manual price set for this holding");
+    if (!quote) return unpriced(holding, "No manual price set for this holding");
+
+    // Still recorded for history: a manually maintained price is the only
+    // record that instrument will ever have.
+    await recordSnapshot(holding, quote);
+    return { ...quote, source: provider.name, stale: false, error: null };
   }
 
   const cached = await readCache(holding);
@@ -167,4 +227,13 @@ async function refreshAll(holdings) {
   return { considered: networkHoldings.length, refreshed, failed };
 }
 
-module.exports = { getQuote, getQuotes, refreshAll, getProvider, PROVIDERS };
+module.exports = {
+  getQuote,
+  getQuotes,
+  refreshAll,
+  getProvider,
+  loadSnapshots,
+  snapshotKey,
+  recordSnapshot,
+  PROVIDERS,
+};

@@ -3,6 +3,8 @@ const Holding = require("../models/holding.model");
 const Trade = require("../models/trade.model");
 const { valueMinor, fromScaled, formatScaled, unitPriceMinor } = require("../utils/quantity");
 const { xirr } = require("../utils/xirr");
+const fx = require("./fx.service");
+const holdingService = require("./holding.service");
 const priceService = require("./price");
 
 /**
@@ -79,18 +81,39 @@ async function loadPositions(user, { includeArchived = false, force = false } = 
 
 /** Positions plus totals and allocation. */
 async function portfolio(user, options = {}) {
-  const positions = await loadPositions(user, options);
+  const [positions, rates] = await Promise.all([
+    loadPositions(user, options),
+    fx.loadRates(user._id, user.baseCurrency),
+  ]);
 
   const open = positions.filter((position) => position.quantityScaled > 0);
 
+  // Positions are reported in their own currency; totals are only meaningful
+  // once converted, and an unconvertible one is excluded rather than added in
+  // as though the currencies matched.
+  const unconverted = [];
+  const toBase = (amountMinor, position) => {
+    if (amountMinor === null) return null;
+    const converted = fx.convertMinor(amountMinor, position.currency, user.baseCurrency, rates);
+    if (converted === null) unconverted.push({ currency: position.currency, amountMinor });
+    return converted;
+  };
+
   const totals = positions.reduce(
     (acc, position) => {
-      acc.costBasisMinor += position.costBasisMinor;
-      acc.realizedPnlMinor += position.realizedPnlMinor;
-      acc.feesMinor += position.feesMinor;
+      const cost = toBase(position.costBasisMinor, position);
+      const realized = toBase(position.realizedPnlMinor, position);
+      const fees = toBase(position.feesMinor, position);
+
+      acc.costBasisMinor += cost ?? 0;
+      acc.realizedPnlMinor += realized ?? 0;
+      acc.feesMinor += fees ?? 0;
+
       if (position.isPriced) {
-        acc.marketValueMinor += position.marketValueMinor;
-        acc.unrealizedPnlMinor += position.unrealizedPnlMinor;
+        const market = toBase(position.marketValueMinor, position);
+        const unrealized = toBase(position.unrealizedPnlMinor, position);
+        acc.marketValueMinor += market ?? 0;
+        acc.unrealizedPnlMinor += unrealized ?? 0;
       } else if (position.quantityScaled > 0) {
         acc.unpricedCount += 1;
       }
@@ -108,28 +131,41 @@ async function portfolio(user, options = {}) {
 
   // Allocation is computed over priced positions only. Including an unvalued
   // holding at zero would quietly overstate every other slice's share.
-  const pricedValueMinor = open
-    .filter((position) => position.isPriced)
-    .reduce((sum, position) => sum + position.marketValueMinor, 0);
-
   const byAssetClass = new Map();
+  let pricedValueMinor = 0;
+
   for (const position of open) {
     if (!position.isPriced) continue;
+
+    const market = fx.convertMinor(
+      position.marketValueMinor,
+      position.currency,
+      user.baseCurrency,
+      rates
+    );
+    if (market === null) continue;
+
+    const cost =
+      fx.convertMinor(position.costBasisMinor, position.currency, user.baseCurrency, rates) ?? 0;
+
     const entry = byAssetClass.get(position.assetClass) ?? {
       assetClass: position.assetClass,
       marketValueMinor: 0,
       costBasisMinor: 0,
       positions: 0,
     };
-    entry.marketValueMinor += position.marketValueMinor;
-    entry.costBasisMinor += position.costBasisMinor;
+    entry.marketValueMinor += market;
+    entry.costBasisMinor += cost;
     entry.positions += 1;
     byAssetClass.set(position.assetClass, entry);
+
+    pricedValueMinor += market;
   }
 
   return {
     currency: user.baseCurrency,
     ...totals,
+    unconverted: fx.mergeUnconverted(unconverted),
     totalPnlMinor: totals.unrealizedPnlMinor + totals.realizedPnlMinor,
     unrealizedPnlPct: pct(totals.unrealizedPnlMinor, totals.costBasisMinor),
     positionCount: open.length,
@@ -221,7 +257,100 @@ async function marketValue(user) {
     marketValueMinor: summary.marketValueMinor,
     unpricedCount: summary.unpricedCount,
     positionCount: summary.positionCount,
+    unconverted: summary.unconverted,
   };
+}
+
+/**
+ * What the portfolio was worth at each of the given moments.
+ *
+ * Positions are replayed exactly from trades, so quantity and cost at any past
+ * date are known precisely. Price is the last snapshot recorded on or before
+ * that date; where none exists — anything before the instrument was first
+ * priced — the position is carried at cost and the point says so.
+ *
+ * Carrying at cost is the honest fallback. It is not what the holding was
+ * worth, but it is what is knowable, and it does not fabricate a gain the way
+ * applying today's price backwards would.
+ *
+ * @param {Date[]} moments ascending
+ * @returns {Promise<{valueMinor:number, costMinor:number, basis:string}[]>}
+ */
+async function valuationHistory(user, moments) {
+  if (moments.length === 0) return [];
+
+  const holdings = await Holding.find({ user: user._id });
+  if (holdings.length === 0) {
+    return moments.map(() => ({ valueMinor: 0, costMinor: 0, basis: "NONE" }));
+  }
+
+  const [trades, snapshots, rates] = await Promise.all([
+    Trade.find({ user: user._id }).sort({ date: 1, createdAt: 1 }),
+    priceService.loadSnapshots(holdings, moments[0]),
+    fx.loadRates(user._id, user.baseCurrency),
+  ]);
+
+  const tradesByHolding = new Map();
+  for (const trade of trades) {
+    const id = String(trade.holding);
+    if (!tradesByHolding.has(id)) tradesByHolding.set(id, []);
+    tradesByHolding.get(id).push(trade);
+  }
+
+  // Latest snapshot at or before `moment`; the lists are ascending so this
+  // walks forward rather than re-scanning.
+  const priceAt = (series, moment) => {
+    if (!series) return null;
+    let found = null;
+    for (const point of series) {
+      if (point.date > moment) break;
+      found = point.priceMinor;
+    }
+    return found;
+  };
+
+  return moments.map((moment) => {
+    let totalValueMinor = 0;
+    let totalCostMinor = 0;
+    let priced = 0;
+    let atCost = 0;
+
+    for (const holding of holdings) {
+      const holdingTrades = tradesByHolding.get(String(holding._id)) ?? [];
+      const position = holdingService.positionAt(holdingTrades, moment);
+      if (position.quantityScaled <= 0) continue;
+
+      const price = priceAt(snapshots.get(priceService.snapshotKey(holding)), moment);
+      const nativeValueMinor =
+        price === null ? position.costMinor : valueMinor(price, position.quantityScaled);
+
+      if (price === null) atCost += 1;
+      else priced += 1;
+
+      const converted = fx.convertMinor(
+        nativeValueMinor,
+        holding.currency,
+        user.baseCurrency,
+        rates
+      );
+      const convertedCost = fx.convertMinor(
+        position.costMinor,
+        holding.currency,
+        user.baseCurrency,
+        rates
+      );
+
+      if (converted !== null) totalValueMinor += converted;
+      if (convertedCost !== null) totalCostMinor += convertedCost;
+    }
+
+    let basis = "NONE";
+    if (priced > 0 && atCost > 0) basis = "MIXED";
+    else if (priced > 0) basis = "MARKET";
+    else if (atCost > 0) basis = "COST";
+
+    return { valueMinor: totalValueMinor, costMinor: totalCostMinor, basis };
+  });
 }
 
 async function refreshPrices(user) {
@@ -229,4 +358,11 @@ async function refreshPrices(user) {
   return priceService.refreshAll(holdings);
 }
 
-module.exports = { portfolio, performance, marketValue, refreshPrices, loadPositions };
+module.exports = {
+  portfolio,
+  performance,
+  marketValue,
+  valuationHistory,
+  refreshPrices,
+  loadPositions,
+};

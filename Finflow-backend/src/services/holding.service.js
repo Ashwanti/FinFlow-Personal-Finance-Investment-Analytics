@@ -94,6 +94,50 @@ async function rebuild(holdingId, session = null) {
   return holding;
 }
 
+/**
+ * The position as it stood at `until`, replayed from trades.
+ *
+ * Pure and synchronous, so the net worth trend can call it once per period per
+ * holding without touching the database. Same FIFO consumption as `rebuild`;
+ * it simply stops early.
+ *
+ * @param {Array} trades sorted by date then createdAt
+ * @returns {{quantityScaled:number, costMinor:number}}
+ */
+function positionAt(trades, until) {
+  const lots = [];
+
+  for (const trade of trades) {
+    if (trade.date > until) break;
+
+    if (trade.type === TRADE_TYPES.BUY) {
+      lots.push({
+        quantityScaled: trade.quantityScaled,
+        costMinor: valueMinor(trade.pricePerUnitMinor, trade.quantityScaled) + trade.feesMinor,
+      });
+      continue;
+    }
+
+    let remaining = trade.quantityScaled;
+    while (remaining > 0 && lots.length > 0) {
+      const lot = lots[0];
+      const taken = Math.min(remaining, lot.quantityScaled);
+      const takenCost = proportionalMinor(lot.costMinor, taken, lot.quantityScaled);
+
+      lot.costMinor -= takenCost;
+      lot.quantityScaled -= taken;
+      remaining -= taken;
+
+      if (lot.quantityScaled <= 0) lots.shift();
+    }
+  }
+
+  return {
+    quantityScaled: lots.reduce((sum, lot) => sum + lot.quantityScaled, 0),
+    costMinor: lots.reduce((sum, lot) => sum + lot.costMinor, 0),
+  };
+}
+
 async function getOwned(userId, holdingId, { session = null } = {}) {
   const holding = await Holding.findOne({ _id: holdingId, user: userId }).session(session);
   if (!holding) throw ApiError.notFound("Holding not found");
@@ -210,6 +254,7 @@ async function remove(userId, holdingId) {
 
 module.exports = {
   rebuild,
+  positionAt,
   getOwned,
   assertInvestmentAccount,
   list,
