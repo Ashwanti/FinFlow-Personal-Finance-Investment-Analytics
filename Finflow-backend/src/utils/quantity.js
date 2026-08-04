@@ -8,13 +8,23 @@
  * quotes).
  */
 
+const { toMinor } = require("./money");
+
 const QUANTITY_SCALE = 1e8;
+const QUANTITY_EXPONENT = 8;
 
 // Keeps quantityScaled inside Number.MAX_SAFE_INTEGER with room to spare.
 const MAX_QUANTITY_SCALED = 1e15;
 
-/** 12.5 -> 1250000000 */
-const toScaled = (quantity) => Math.round(Number(quantity) * QUANTITY_SCALE);
+/**
+ * 12.5 -> 1250000000
+ *
+ * Shares toMinor's textual shift rather than multiplying by 1e8. The float
+ * error is worse here, not better: eight decimal places leave far more room
+ * for a quantity to land a unit off, and a wrong quantity misprices the whole
+ * position.
+ */
+const toScaled = (quantity) => toMinor(quantity, QUANTITY_EXPONENT);
 
 /** 1250000000 -> 12.5 */
 const fromScaled = (scaled) => scaled / QUANTITY_SCALE;

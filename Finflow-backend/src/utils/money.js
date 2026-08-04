@@ -10,9 +10,44 @@ const DEFAULT_EXPONENT = 2;
 // Well inside Number.MAX_SAFE_INTEGER (9.007e15), so sums of many rows stay exact.
 const MAX_MINOR = 1e15;
 
-/** 250.5 -> 25050 */
+/**
+ * 250.5 -> 25050
+ *
+ * Shifts the decimal point textually instead of multiplying by a power of ten.
+ * The multiply is exact for every two-decimal amount, but not beyond: 1.005
+ * evaluates to 100.49999999999999, which rounds *down* to ₹1.00 rather than up
+ * to ₹1.01, and 8.165 lands on ₹8.16. Those are precisely the errors integer
+ * storage exists to prevent, so the conversion into it must not introduce them.
+ *
+ * Rounds half away from zero on the first dropped digit.
+ */
 function toMinor(major, exponent = DEFAULT_EXPONENT) {
-  return Math.round(Number(major) * 10 ** exponent);
+  const value = Number(major);
+  if (!Number.isFinite(value)) {
+    throw new TypeError(`Cannot convert ${major} to minor units`);
+  }
+
+  let text = typeof major === "string" ? major.trim() : String(value);
+
+  // Exponential notation has no decimal point to shift. Only reachable for
+  // magnitudes far outside MAX_MINOR, where a float multiply is good enough.
+  if (/e/i.test(text)) {
+    return Math.round(value * 10 ** exponent);
+  }
+
+  const negative = text.startsWith("-");
+  if (negative || text.startsWith("+")) text = text.slice(1);
+
+  const [whole = "0", fraction = ""] = text.split(".");
+  // One digit past the target precision, so the rounding decision is made on
+  // the input the caller actually gave rather than on a float artefact.
+  const digits = (fraction + "0".repeat(exponent + 1)).slice(0, exponent + 1);
+
+  let minor =
+    Number(whole || "0") * 10 ** exponent + Number(digits.slice(0, exponent) || "0");
+  if (Number(digits[exponent]) >= 5) minor += 1;
+
+  return negative ? -minor : minor;
 }
 
 /** 25050 -> 250.5 */
