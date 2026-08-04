@@ -5,6 +5,7 @@ const analyticsRoutes = require("./analytics.routes");
 const authRoutes = require("./auth.routes");
 const budgetRoutes = require("./budget.routes");
 const categoryRoutes = require("./category.routes");
+const fxRoutes = require("./fx.routes");
 const investmentRoutes = require("./investment.routes");
 const transactionRoutes = require("./transaction.routes");
 const userRoutes = require("./user.routes");
@@ -19,5 +20,6 @@ router.use("/transactions", transactionRoutes);
 router.use("/analytics", analyticsRoutes);
 router.use("/budgets", budgetRoutes);
 router.use("/investments", investmentRoutes);
+router.use("/fx", fxRoutes);
 
 module.exports = router;
