@@ -39,4 +39,15 @@ module.exports = {
     refreshTtlMs: refreshTtlDays * 24 * 60 * 60 * 1000,
     issuer: "finflow",
   },
+  prices: {
+    // How long a cached quote is served before a vendor is asked again. Free
+    // price APIs rate-limit hard, so this is the main defence against a busy
+    // dashboard exhausting the quota.
+    cacheTtlMinutes: Number(process.env.PRICE_CACHE_TTL_MINUTES) || 15,
+    // Background refresh. Off by default and always off under test: a suite
+    // that reaches the network is a suite that fails on a train.
+    syncEnabled: process.env.PRICE_SYNC_ENABLED === "true" && nodeEnv !== "test",
+    syncIntervalMinutes: Number(process.env.PRICE_SYNC_INTERVAL_MINUTES) || 15,
+    coingeckoBaseUrl: process.env.COINGECKO_BASE_URL || "https://api.coingecko.com/api/v3",
+  },
 };
