@@ -331,6 +331,9 @@ async function netWorth(user) {
     // Same principle for currencies: balances with no known rate are left out
     // and listed, never converted at a guessed rate.
     unconverted: fx.mergeUnconverted(unconverted, investments.unconverted),
+    // Rates old enough to distrust. The total is still computed with them —
+    // a stale rate beats none — but the caller is told which ones they are.
+    staleRates: await fx.staleRates(user._id),
     byType: [...byType.values()].sort((a, b) => b.totalMinor - a.totalMinor),
   };
 }
