@@ -25,6 +25,8 @@ const SUITES = [
   ["Phase 3 — Analytics", require("./suites/analytics")],
   ["Phase 4 — Budgets", require("./suites/budgets")],
   ["Phase 5 — Investments", require("./suites/investments")],
+  ["Multi-currency", require("./suites/multicurrency")],
+  ["History & job leases", require("./suites/history")],
 ];
 
 let passed = 0;
