@@ -18,11 +18,19 @@ const Account = require("../src/models/account.model");
 const Category = require("../src/models/category.model");
 const Transaction = require("../src/models/transaction.model");
 const User = require("../src/models/user.model");
+const Budget = require("../src/models/budget.model");
+const Holding = require("../src/models/holding.model");
+const Trade = require("../src/models/trade.model");
 const accountService = require("../src/services/account.service");
 const analyticsService = require("../src/services/analytics.service");
+const budgetService = require("../src/services/budget.service");
 const categoryService = require("../src/services/category.service");
+const holdingService = require("../src/services/holding.service");
+const portfolioService = require("../src/services/portfolio.service");
+const tradeService = require("../src/services/trade.service");
 const transactionService = require("../src/services/transaction.service");
 const { formatMinor } = require("../src/utils/money");
+const { toScaled } = require("../src/utils/quantity");
 
 const DEMO_EMAIL = "demo@finflow.test";
 const DEMO_PASSWORD = "Demo1234";
@@ -48,6 +56,9 @@ async function main() {
       Transaction.deleteMany({ user: user._id }),
       Account.deleteMany({ user: user._id }),
       Category.deleteMany({ user: user._id }),
+      Budget.deleteMany({ user: user._id }),
+      Trade.deleteMany({ user: user._id }),
+      Holding.deleteMany({ user: user._id }),
     ]);
   } else {
     user = await User.create({
@@ -175,25 +186,124 @@ async function main() {
     created += 2;
   }
 
+  // --- budgets ---
+  for (const spec of [
+    { category: "Groceries", amountMinor: 8_000_00 },
+    { category: "Food & Dining", amountMinor: 5_000_00 },
+    { category: "Shopping", amountMinor: 6_000_00 },
+    // Started two months back with rollover on, so the demo shows a carry
+    // rather than a fresh envelope.
+    { category: "Transport", amountMinor: 3_000_00, rollover: true, startMonthsAgo: 2 },
+  ]) {
+    await budgetService.create(user, {
+      categoryId: byName[spec.category]._id,
+      amountMinor: spec.amountMinor,
+      period: "MONTHLY",
+      rollover: spec.rollover ?? false,
+      ...(spec.startMonthsAgo && { startDate: dayIn(spec.startMonthsAgo, 1) }),
+    });
+  }
+
+  // --- investments ---
+  // Manual prices throughout: the seeder must work offline and must not spend
+  // anyone's rate limit. Switch a holding to `coingecko` to see live pricing.
+  const portfolioSpecs = [
+    {
+      symbol: "INFY",
+      name: "Infosys Ltd",
+      assetClass: "EQUITY",
+      manualPriceMinor: 1_650_00,
+      trades: [
+        { quantity: 5, priceMinor: 1_420_00, monthsAgo: 5 },
+        { quantity: 5, priceMinor: 1_510_00, monthsAgo: 3 },
+      ],
+    },
+    {
+      symbol: "TCS",
+      name: "Tata Consultancy Services",
+      assetClass: "EQUITY",
+      manualPriceMinor: 4_100_00,
+      trades: [
+        { quantity: 3, priceMinor: 3_800_00, monthsAgo: 4 },
+        { quantity: 2, priceMinor: 3_950_00, monthsAgo: 1 },
+      ],
+    },
+    {
+      symbol: "NIFTYBEES",
+      name: "Nippon India ETF Nifty 50",
+      assetClass: "ETF",
+      manualPriceMinor: 268_00,
+      trades: [{ quantity: 20, priceMinor: 250_00, monthsAgo: 5 }],
+    },
+  ];
+
+  let tradeCount = 0;
+  for (const spec of portfolioSpecs) {
+    const holding = await holdingService.create(user._id, {
+      accountId: broker.id,
+      symbol: spec.symbol,
+      name: spec.name,
+      assetClass: spec.assetClass,
+      priceProvider: "manual",
+      manualPriceMinor: spec.manualPriceMinor,
+    });
+
+    for (const trade of spec.trades) {
+      await tradeService.create(user._id, {
+        holdingId: holding._id,
+        type: "BUY",
+        quantityScaled: toScaled(trade.quantity),
+        pricePerUnitMinor: trade.priceMinor,
+        feesMinor: 20_00,
+        date: dayIn(trade.monthsAgo, 12),
+      });
+      tradeCount += 1;
+    }
+  }
+
   const fresh = await User.findById(user._id);
-  const [summary, worth] = await Promise.all([
+  const [summary, worth, budgets, performance] = await Promise.all([
     analyticsService.summary(fresh, {}),
     analyticsService.netWorth(fresh),
+    budgetService.overview(fresh),
+    portfolioService.performance(fresh),
   ]);
   const finalAccounts = await accountService.list(user._id);
 
-  console.log(`\nSeeded ${created} transactions across ${MONTHS} months\n`);
+  console.log(
+    `\nSeeded ${created} transactions and ${tradeCount} trades across ${MONTHS} months\n`
+  );
   console.log("Accounts");
   for (const account of finalAccounts) {
     console.log(`  ${account.name.padEnd(20)} ₹${formatMinor(account.balanceMinor).padStart(12)}`);
   }
+
   console.log(`\nThis month`);
   console.log(`  income   ₹${formatMinor(summary.incomeMinor)}`);
   console.log(`  expense  ₹${formatMinor(summary.expenseMinor)}`);
   console.log(`  net      ₹${formatMinor(summary.netMinor)}`);
   console.log(`  savings  ${summary.savingsRatePct ?? "—"}%`);
   console.log(`  transfers excluded: ₹${formatMinor(summary.transferVolumeMinor)}`);
-  console.log(`\nNet worth  ₹${formatMinor(worth.totalMinor)}`);
+
+  console.log(`\nBudgets`);
+  for (const budget of budgets.budgets) {
+    const bar = `${formatMinor(budget.spentMinor)} / ${formatMinor(budget.availableMinor)}`;
+    console.log(
+      `  ${budget.category.name.padEnd(16)} ₹${bar.padStart(22)}  ${String(budget.usedPct ?? "—").padStart(6)}%  ${budget.status}`
+    );
+  }
+
+  console.log(`\nPortfolio`);
+  console.log(`  market value  ₹${formatMinor(performance.marketValueMinor)}`);
+  console.log(`  invested      ₹${formatMinor(performance.investedMinor)}`);
+  console.log(`  unrealised    ₹${formatMinor(performance.unrealizedPnlMinor)}`);
+  console.log(`  fees paid     ₹${formatMinor(performance.feesMinor)}`);
+  console.log(`  XIRR          ${performance.xirrPct ?? "—"}%`);
+
+  console.log(
+    `\nNet worth  ₹${formatMinor(worth.totalMinor)}` +
+      `   (cash ₹${formatMinor(worth.cashMinor)} + investments ₹${formatMinor(worth.investmentsMinor)})`
+  );
   console.log(`\nLog in with  ${DEMO_EMAIL} / ${DEMO_PASSWORD}\n`);
 
   await disconnectDB();
