@@ -2,6 +2,7 @@ const env = require("../config/env");
 const { PRICE_PROVIDERS } = require("../constants");
 const Holding = require("../models/holding.model");
 const priceService = require("../services/price");
+const { withLock } = require("../utils/jobLock");
 
 /**
  * Periodically refreshes prices for holdings backed by a vendor.
@@ -10,25 +11,59 @@ const priceService = require("../services/price");
  * a third party, and so the number of vendor calls depends on the clock rather
  * than on how often someone opens the dashboard.
  *
- * Deliberately unsophisticated: a single interval in-process. It is the right
- * size for one server. If FinFlow ever runs more than one instance this needs
- * a real queue with a lock, otherwise every instance refreshes every symbol
- * and the rate limit arrives that much sooner.
+ * Safe to run on more than one instance. Each tick takes a lease in MongoDB
+ * and only the winner does the work; the others skip. Without that, every
+ * instance refreshes every symbol on its own timer and the vendor sees N times
+ * the traffic, so a free tier's rate limit arrives N times sooner.
+ *
+ * The lease is a lease and not a mutex — it expires — so an instance that dies
+ * mid-run cannot wedge the job. The guarantee is "almost always one runner",
+ * which is the right level for refreshing a cache of prices.
  */
+const LOCK_NAME = "price-sync";
+
 let timer = null;
 let running = false;
 
-async function runOnce() {
-  // Overlap protection: a slow vendor must not stack runs on top of each other.
+async function runOnce({ skipLock = false } = {}) {
+  // In-process guard first: it is free, and a slow vendor must not stack runs
+  // on this instance even before the cross-instance lease is considered.
   if (running) {
     console.warn("Price sync still running; skipping this tick");
     return null;
   }
 
   running = true;
-  const startedAt = Date.now();
 
   try {
+    if (skipLock) return await refresh();
+
+    // The lease outlives the interval, so a run that overshoots its slot is
+    // not immediately trampled by the next tick on another instance.
+    const ttlMs = Math.max(env.prices.syncIntervalMinutes * 60 * 1000 * 2, 60000);
+    const outcome = await withLock(LOCK_NAME, ttlMs, () => refresh());
+
+    if (outcome.skipped) {
+      console.log("💤 Price sync held by another instance; skipping");
+      return null;
+    }
+    return outcome.result;
+  } catch (err) {
+    console.error("Price sync failed:", err.message);
+    return null;
+  } finally {
+    running = false;
+  }
+}
+
+/**
+ * The work itself. Throws on failure so the lease records why; runOnce is what
+ * keeps a bad vendor from taking the process down.
+ */
+async function refresh() {
+  const startedAt = Date.now();
+
+  {
     // Distinct instruments, not distinct holdings — ten users holding bitcoin
     // is one lookup, and the cache serves all of them.
     const holdings = await Holding.aggregate([
@@ -56,13 +91,6 @@ async function runOnce() {
         `(${result.failed} failed) in ${Date.now() - startedAt}ms`
     );
     return result;
-  } catch (err) {
-    // A failed sync must never take the process down; the cache simply goes
-    // stale and the API reports it as such.
-    console.error("Price sync failed:", err.message);
-    return null;
-  } finally {
-    running = false;
   }
 }
 
