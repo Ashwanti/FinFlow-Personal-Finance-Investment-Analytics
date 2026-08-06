@@ -1,4 +1,4 @@
-import { Route, Routes } from "react-router-dom";
+import { Route, Routes } from "react-router";
 
 import { RequireAuth, RequireGuest } from "./auth/RouteGuards";
 import { Layout } from "./components/Layout";
