@@ -1,0 +1,19 @@
+# npm workspaces hoist shared dependencies here.
+node_modules/
+
+# Environment — never commit real secrets
+.env
+.env.*
+!.env.example
+
+# Build output
+dist/
+coverage/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
