@@ -2,7 +2,7 @@
 
 React + Vite UI for the [FinFlow API](../Finflow-backend/README.md).
 
-**Done so far:** scaffold, the full auth flow, and a working dashboard.
+**Done:** auth, dashboard, transactions, accounts, budgets and portfolio.
 
 ---
 
@@ -82,11 +82,20 @@ src/
 ├── auth/
 │   ├── AuthContext.jsx  session state + silent restore
 │   └── RouteGuards.jsx  RequireAuth / RequireGuest
-├── components/        Layout, Field, Stat, Spinner
-├── pages/             Login, Register, Dashboard
+├── components/        Layout, Field, Select, Stat, Modal, Spinner, FormError
+├── pages/             Login, Register, Dashboard, Transactions,
+│                      Accounts, Budgets, Portfolio
 ├── App.jsx            routes
 └── main.jsx
 ```
+
+`lib/queryString.js` drops empty values, which is not cosmetic: the API
+validates query parameters with Zod enums and object ids, so clearing a
+dropdown and sending `?type=` is a 400 rather than a removed filter.
+
+`lib/hooks.js` names every cache key a write can touch. One transaction moves
+an account balance, a budget, the dashboard and the portfolio's cash side — a
+screen that invalidates half of them leaves the rest quietly wrong.
 
 ---
 
@@ -122,12 +131,34 @@ could not be priced are counted instead of being shown as worth nothing.
 
 ---
 
+## The screens
+
+**Transactions** — filter by type, account, category, date range and free text,
+with paging; create, edit and delete. Transfers have their own form because
+they write two linked rows and are neither income nor expense. Across
+currencies it asks for the amount that actually landed rather than deriving
+one: the server will not invent a rate, and a wrong guess corrupts net worth.
+
+**Accounts** — balances and net worth, with create, edit and remove. "Remove"
+is worded carefully because the API archives an account that has transactions
+rather than orphaning its history. Recalculate is exposed too, and reports the
+drift it corrected.
+
+**Budgets** — progress meters using the status the API computes. Only expense
+categories are offered; a cap on income is a target, not a limit, and the API
+rejects it.
+
+**Portfolio** — positions, allocation and XIRR. A stale price shows the date it
+was taken so it is never mistaken for a live mark, and an unpriceable position
+reads "unpriced" rather than showing zero.
+
 ## Not built yet
 
-Transactions, Accounts, Budgets and Portfolio are routed and render an honest
-placeholder naming the endpoint behind them. Every one of those APIs is
-finished and tested — only the screens are outstanding.
+No screen for holdings and trades — `POST /api/investments/holdings` and
+`/trades` still have to be called directly to build a portfolio, though
+everything about it renders once the data exists. FX rates
+(`PUT /api/fx/rates`) are the same.
 
-Transactions is the one to build next: it is where the app earns its keep daily,
-and `GET /api/transactions` already supports filtering by type, account,
-category, date range, tags, amount range and free text, with pagination.
+There are also no frontend tests. The API calls behind every screen are
+verified end to end against a live backend, but nothing exercises the React
+components themselves; Vitest with Testing Library is the gap to fill.
