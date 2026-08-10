@@ -2,10 +2,14 @@ import { Route, Routes } from "react-router";
 
 import { RequireAuth, RequireGuest } from "./auth/RouteGuards";
 import { Layout } from "./components/Layout";
+import { AccountsPage } from "./pages/AccountsPage";
+import { BudgetsPage } from "./pages/BudgetsPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { LoginPage } from "./pages/LoginPage";
-import { PlaceholderPage } from "./pages/PlaceholderPage";
+import { NotFoundPage } from "./pages/NotFoundPage";
+import { PortfolioPage } from "./pages/PortfolioPage";
 import { RegisterPage } from "./pages/RegisterPage";
+import { TransactionsPage } from "./pages/TransactionsPage";
 
 export function App() {
   return (
@@ -18,51 +22,14 @@ export function App() {
       <Route element={<RequireAuth />}>
         <Route element={<Layout />}>
           <Route index element={<DashboardPage />} />
-          <Route
-            path="transactions"
-            element={
-              <PlaceholderPage
-                title="Transactions"
-                endpoint="GET /api/transactions"
-                note="Filtering, pagination and transfers are all supported."
-              />
-            }
-          />
-          <Route
-            path="accounts"
-            element={<PlaceholderPage title="Accounts" endpoint="GET /api/accounts" />}
-          />
-          <Route
-            path="budgets"
-            element={<PlaceholderPage title="Budgets" endpoint="GET /api/budgets/overview" />}
-          />
-          <Route
-            path="portfolio"
-            element={
-              <PlaceholderPage
-                title="Portfolio"
-                endpoint="GET /api/investments/portfolio"
-                note="Positions, allocation and XIRR are already computed."
-              />
-            }
-          />
+          <Route path="transactions" element={<TransactionsPage />} />
+          <Route path="accounts" element={<AccountsPage />} />
+          <Route path="budgets" element={<BudgetsPage />} />
+          <Route path="portfolio" element={<PortfolioPage />} />
         </Route>
       </Route>
 
-      <Route
-        path="*"
-        element={
-          <div className="auth-page">
-            <div className="auth-card">
-              <h1>Page not found</h1>
-              <p className="muted">That route does not exist.</p>
-              <a className="btn btn-primary btn-block" href="/">
-                Back to the dashboard
-              </a>
-            </div>
-          </div>
-        }
-      />
+      <Route path="*" element={<NotFoundPage />} />
     </Routes>
   );
 }
