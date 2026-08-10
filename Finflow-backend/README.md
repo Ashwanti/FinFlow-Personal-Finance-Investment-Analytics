@@ -39,6 +39,8 @@ or create a free cluster on MongoDB Atlas.
 | `npm run smoke` | 314-check end-to-end test against an in-memory MongoDB |
 | `npm run check` | Both of the above |
 | `npm run seed` | Fill your database with 6 months of realistic demo data |
+| `npm run postman` | Regenerate the Postman collection |
+| `npm run postman:test` | Regenerate, then run it with newman against a live API |
 
 `npm test` runs in about a tenth of a second and covers the arithmetic — money
 conversion, scaled quantities, FIFO cost splitting, XIRR, timezone boundaries.
@@ -49,6 +51,34 @@ confirm a change did not break anything.
 `npm run seed` creates `demo@finflow.test` / `Demo1234` with four accounts and
 ~90 transactions, so the frontend has something real to render. Re-running
 rebuilds that user's data and touches no one else.
+
+---
+
+## Postman
+
+[`postman/`](postman/) holds a collection covering all 59 endpoints, with 316
+assertions. Import both files into Postman:
+
+- `FinFlow.postman_collection.json`
+- `FinFlow.local.postman_environment.json`
+
+Start the API, then **run the whole collection in order** — Collection Runner in
+the UI, or `npm run postman:test` on the command line. Order matters: requests
+capture ids as they go (register → create an account → post a transaction
+against it), so an individual request will 401 or 404 until the ones before it
+have run. Nothing needs seeding first; the collection builds and tears down its
+own data, and uses a fresh email each run so it is safely repeatable.
+
+The collection is **generated** by [scripts/postman.js](scripts/postman.js), not
+hand-maintained. A three-thousand-line JSON file edited by hand drifts from the
+API within a week and nothing tells you when it has. Add an endpoint, add it to
+the generator, re-run `npm run postman`.
+
+Alongside the happy paths it asserts the failure paths that carry the design:
+a wrong password and an unknown email return the same message, an income
+category is refused on an expense, `type: "TRANSFER"` is refused on the ordinary
+endpoint, a transfer writes exactly two legs with no category, deleting one leg
+removes both, and selling more than you hold is rejected.
 
 > **Transfers need MongoDB transactions, which need a replica set.** Atlas and
 > `MongoMemoryReplSet` provide one; a standalone local `mongod` does not. On
