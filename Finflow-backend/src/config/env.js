@@ -27,6 +27,12 @@ module.exports = {
   isTest: nodeEnv === "test",
   port: Number(process.env.PORT) || 3000,
   mongoUri: process.env.MONGODB_URI,
+  // Index builds are idempotent and cheap at this size, and a *missing* unique
+  // index is silent data corruption — two accounts on one email, discovered
+  // much later. So this defaults on everywhere. Set MONGO_AUTO_INDEX=false and
+  // manage indexes with a migration once the collections are large enough that
+  // a build is not free.
+  mongoAutoIndex: process.env.MONGO_AUTO_INDEX !== "false",
   clientOrigins: (process.env.CLIENT_ORIGIN || "http://localhost:5173")
     .split(",")
     .map((origin) => origin.trim())
