@@ -17,3 +17,10 @@ npm-debug.log*
 # OS
 .DS_Store
 Thumbs.db
+
+# Vercel CLI: project link and the OIDC token it pulls
+.vercel
+
+# Real secrets never get committed, but the templates that document them must.
+.env*
+!.env.example
