@@ -3,7 +3,10 @@ const { z } = require("zod");
 const { ASSET_CLASSES, PRICE_PROVIDERS, TRADE_TYPES } = require("../constants");
 const { MAX_QUANTITY_SCALED } = require("../utils/quantity");
 const { MAX_MINOR } = require("../utils/money");
-const { objectId, dateInput, pagination } = require("./common.validator");
+const { objectId, objectIdFor, dateInput, pagination } = require("./common.validator");
+
+const accountId = objectIdFor("an account to hold this in");
+const holdingId = objectIdFor("a holding to trade");
 
 const symbol = z.string().trim().min(1, "Symbol is required").max(32);
 const assetClass = z.enum(Object.values(ASSET_CLASSES));
@@ -58,7 +61,7 @@ const requireOne = (data, ctx, majorKey, minorKey, { optional = false } = {}) =>
 
 const createHoldingSchema = z
   .object({
-    accountId: objectId,
+    accountId,
     symbol,
     name: z.string().trim().max(120).optional(),
     assetClass: assetClass.default(ASSET_CLASSES.EQUITY),
@@ -85,7 +88,7 @@ const createHoldingSchema = z
 
 const updateHoldingSchema = z
   .object({
-    accountId: objectId.optional(),
+    accountId: accountId.optional(),
     name: z.string().trim().max(120).optional(),
     assetClass: assetClass.optional(),
     currency: currency.optional(),
@@ -112,7 +115,7 @@ const listHoldingsSchema = z.object({
 
 const createTradeSchema = z
   .object({
-    holdingId: objectId,
+    holdingId,
     type: z.enum(Object.values(TRADE_TYPES)),
     quantity: quantity.optional(),
     quantityScaled: quantityScaled.optional(),

@@ -3,6 +3,7 @@ const { z } = require("zod");
 const { TRANSACTION_TYPES } = require("../constants");
 const {
   objectId,
+  objectIdFor,
   dateInput,
   amountMinor,
   amountMajor,
@@ -18,11 +19,14 @@ const spendableType = z.enum([TRANSACTION_TYPES.INCOME, TRANSACTION_TYPES.EXPENS
 const description = z.string().trim().max(200);
 const notes = z.string().trim().max(1000);
 
+const accountId = objectIdFor("an account");
+const categoryId = objectIdFor("a category");
+
 const createTransactionSchema = z
   .object({
     type: spendableType,
-    accountId: objectId,
-    categoryId: objectId,
+    accountId,
+    categoryId,
     amount: amountMajor.optional(),
     amountMinor: amountMinor.optional(),
     date: dateInput,
@@ -35,8 +39,8 @@ const createTransactionSchema = z
 const updateTransactionSchema = z
   .object({
     type: spendableType.optional(),
-    accountId: objectId.optional(),
-    categoryId: objectId.optional(),
+    accountId: accountId.optional(),
+    categoryId: categoryId.optional(),
     amount: amountMajor.optional(),
     amountMinor: amountMinor.optional(),
     date: dateInput.optional(),
@@ -51,8 +55,8 @@ const updateTransactionSchema = z
 
 const createTransferSchema = z
   .object({
-    fromAccountId: objectId,
-    toAccountId: objectId,
+    fromAccountId: objectIdFor("an account to move money from"),
+    toAccountId: objectIdFor("an account to move money to"),
     amount: amountMajor.optional(),
     amountMinor: amountMinor.optional(),
     // Only needed when the two accounts hold different currencies.

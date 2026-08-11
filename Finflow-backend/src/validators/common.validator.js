@@ -3,9 +3,38 @@ const { z } = require("zod");
 
 const { MAX_MINOR } = require("../utils/money");
 
-const objectId = z
-  .string()
-  .refine((value) => mongoose.isValidObjectId(value), { message: "Not a valid id" });
+/**
+ * A required object id, reporting *one* problem at a time.
+ *
+ * The empty case earns its own message. An unfilled `<select>` submits `""`,
+ * which is a perfectly good string, so it used to fall straight through to the
+ * format test and come back "Not a valid id" — true, and useless to someone who
+ * has simply not chosen an account yet. Missing and malformed are different
+ * mistakes and deserve different words.
+ *
+ * The two checks live in one `superRefine` rather than a `min(1)` followed by a
+ * `refine`, because Zod runs every check on a field: an empty value would fail
+ * both and the form would be handed "Select an account" and "Not a valid id"
+ * for the same box, with nothing to say which to show.
+ */
+const objectIdWith = (missing) =>
+  z.string({ message: missing }).trim().superRefine((value, ctx) => {
+    if (value.length === 0) {
+      ctx.addIssue({ code: "custom", message: missing });
+      return;
+    }
+    if (!mongoose.isValidObjectId(value)) {
+      ctx.addIssue({ code: "custom", message: "Not a valid id" });
+    }
+  });
+
+const objectId = objectIdWith("Required");
+
+/**
+ * The same, with the field named — "Select an account" rather than a bare
+ * "Required", which is what a form field wants to say.
+ */
+const objectIdFor = (label) => objectIdWith(`Select ${label}`);
 
 const idParam = z.object({ id: objectId });
 
@@ -59,6 +88,7 @@ const requireOneAmount = (data, ctx, { optional = false } = {}) => {
 
 module.exports = {
   objectId,
+  objectIdFor,
   idParam,
   dateInput,
   amountMinor,

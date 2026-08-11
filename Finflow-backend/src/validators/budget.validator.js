@@ -2,7 +2,7 @@ const { z } = require("zod");
 
 const { BUDGET_PERIODS } = require("../constants");
 const {
-  objectId,
+  objectIdFor,
   dateInput,
   amountMinor,
   amountMajor,
@@ -12,9 +12,11 @@ const {
 const period = z.enum(Object.values(BUDGET_PERIODS));
 const notes = z.string().trim().max(500);
 
+const categoryId = objectIdFor("a category to budget");
+
 const createBudgetSchema = z
   .object({
-    categoryId: objectId,
+    categoryId,
     amount: amountMajor.optional(),
     amountMinor: amountMinor.optional(),
     period: period.default(BUDGET_PERIODS.MONTHLY),
@@ -26,7 +28,7 @@ const createBudgetSchema = z
 
 const updateBudgetSchema = z
   .object({
-    categoryId: objectId.optional(),
+    categoryId: categoryId.optional(),
     amount: amountMajor.optional(),
     amountMinor: amountMinor.optional(),
     period: period.optional(),
